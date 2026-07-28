@@ -1,0 +1,23 @@
+[package]
+name = "kemuri-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kemuri-core = { workspace = true }
+kemuri-config = { workspace = true }
+kemuri-server = { workspace = true }
+kemuri-storage = { workspace = true }
+kemuri-probes = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+serde_yaml = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

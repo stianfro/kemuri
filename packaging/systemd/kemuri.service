@@ -1,0 +1,26 @@
+[Unit]
+Description=Kemuri Monitoring Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kemuri
+Group=kemuri
+ExecStart=/usr/local/bin/kemuri serve --config /etc/kemuri/kemuri.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kemuri
+StateDirectory=kemuri
+ConfigurationDirectory=kemuri
+
+[Install]
+WantedBy=multi-user.target

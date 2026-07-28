@@ -144,6 +144,48 @@ impl KemuriConfig {
                 parse_duration(&rule.window).map_err(|e| {
                     ConfigError::validation(format!("rules.{}.window", id), e.to_string())
                 })?;
+                if ![
+                    "measurement_loss_ratio",
+                    "health_failure_ratio",
+                    "healthy_sample_ratio",
+                    "consecutive_total_loss",
+                    "consecutive_unhealthy",
+                    "latency",
+                    "no_data",
+                ]
+                .contains(&rule.metric.as_str())
+                {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.metric", id),
+                        "unsupported alert metric",
+                    ));
+                }
+                if !["gt", "gte", "lt", "lte", "eq"].contains(&rule.operator.as_str()) {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.operator", id),
+                        "unsupported alert operator",
+                    ));
+                }
+                for (field, value) in [
+                    ("duration", rule.duration.as_deref()),
+                    ("repeat_every", rule.repeat_every.as_deref()),
+                    ("no_data_period", rule.no_data_period.as_deref()),
+                ] {
+                    if let Some(value) = value {
+                        let parsed = parse_duration(value).map_err(|e| {
+                            ConfigError::validation(
+                                format!("rules.{}.{}", id, field),
+                                e.to_string(),
+                            )
+                        })?;
+                        if parsed.is_zero() {
+                            return Err(ConfigError::validation(
+                                format!("rules.{}.{}", id, field),
+                                "must be greater than zero",
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -161,14 +203,87 @@ impl KemuriConfig {
             }
         }
 
+        self.scheduler.validate()?;
+        self.storage.validate()?;
+        parse_duration(&self.server.shutdown_timeout)
+            .map_err(|e| ConfigError::validation("server.shutdown_timeout", e.to_string()))?;
+
         Ok(warnings)
     }
 
     pub fn generation_hash(&self) -> ConfigGeneration {
         use sha2::{Digest, Sha256};
-        let yaml = serde_yaml::to_string(self).unwrap_or_default();
+        let mut canonical = self.clone();
+        canonical
+            .profiles
+            .sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
+        canonical
+            .notifiers
+            .sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
+        canonical
+            .rules
+            .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        canonical
+            .targets
+            .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        for target in &mut canonical.targets {
+            target
+                .checks
+                .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        }
+        let json = serde_json::to_vec(&canonical).unwrap_or_default();
         let mut hasher = Sha256::new();
-        hasher.update(yaml.as_bytes());
+        hasher.update(json);
+        let mut secret_values = Vec::new();
+        for notifier in &canonical.notifiers {
+            match notifier {
+                NotifierConfig::Webhook(params) => {
+                    if let Ok(value) = params.url.resolve() {
+                        secret_values.push((format!("notifier:{}:url", params.id), value));
+                    }
+                    if let Some(headers) = &params.headers {
+                        for (name, secret) in headers {
+                            if let Ok(value) = secret.resolve() {
+                                secret_values.push((
+                                    format!(
+                                        "notifier:{}:header:{}",
+                                        params.id,
+                                        name.to_lowercase()
+                                    ),
+                                    value,
+                                ));
+                            }
+                        }
+                    }
+                }
+                NotifierConfig::Smtp(params) => {
+                    if let Some(secret) = &params.password
+                        && let Ok(value) = secret.resolve()
+                    {
+                        secret_values.push((format!("notifier:{}:password", params.id), value));
+                    }
+                }
+            }
+        }
+        for target in &canonical.targets {
+            for check in &target.checks {
+                if let Some(secret) = &check.body
+                    && let Ok(value) = secret.resolve()
+                {
+                    secret_values.push((
+                        format!("target:{}:check:{}:body", target.id, check.id),
+                        value,
+                    ));
+                }
+            }
+        }
+        secret_values.sort_by(|left, right| left.0.cmp(&right.0));
+        for (key, value) in secret_values {
+            hasher.update(key.as_bytes());
+            hasher.update([0]);
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
         let hash = hasher.finalize();
         ConfigGeneration::new(hex::encode(hash))
     }
@@ -180,7 +295,13 @@ impl KemuriConfig {
 
         let mut checks = Vec::new();
         for target in &self.targets {
+            if !target.enabled {
+                continue;
+            }
             for check_cfg in &target.checks {
+                if !check_cfg.enabled {
+                    continue;
+                }
                 let profile = profile_map.get(&check_cfg.profile).ok_or_else(|| {
                     ConfigError::validation(
                         format!("targets.{}.checks.{}.profile", target.id, check_cfg.id),
@@ -219,7 +340,7 @@ pub struct ResolvedCheckDef {
     pub probe_params: ResolvedProbeParams,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ResolvedProbeParams {
     Icmp(ResolvedIcmpParams),
     Http(ResolvedHttpParams),
@@ -227,31 +348,48 @@ pub enum ResolvedProbeParams {
     Dns(ResolvedDnsParams),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedIcmpParams {
     pub count: u32,
+    pub address_family: String,
+    pub payload_size: usize,
+    pub source_address: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedHttpParams {
     pub url: String,
     pub method: Option<String>,
     pub headers: HashMap<String, String>,
     pub expected_status: Option<u16>,
-    pub body: Option<SecretRef>,
+    pub expected_status_range: Option<(u16, u16)>,
+    pub body: Option<String>,
+    pub follow_redirects: bool,
+    pub max_redirect_count: u32,
+    pub connection_mode: String,
+    pub measure_until: String,
+    pub user_agent: Option<String>,
+    pub tls_validate: bool,
+    pub root_certificates: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedTcpParams {
     pub host: String,
     pub port: u16,
+    pub address_family: String,
+    pub source_address: Option<String>,
+    pub tls: Option<TcpTlsConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedDnsParams {
     pub domain: String,
     pub record_type: Option<String>,
     pub resolver: Option<String>,
+    pub protocol: String,
+    pub expected_rcode: String,
+    pub require_answer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +468,8 @@ pub struct StorageConfig {
     pub path: String,
     #[serde(default)]
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub disk_pressure: DiskPressureConfig,
 }
 
 impl Default for StorageConfig {
@@ -337,8 +477,55 @@ impl Default for StorageConfig {
         Self {
             path: default_db_path(),
             retention: RetentionConfig::default(),
+            disk_pressure: DiskPressureConfig::default(),
         }
     }
+}
+
+impl StorageConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.retention.validate()?;
+        let warning = parse_percentage_value(
+            &self.disk_pressure.warning_free,
+            "storage.disk_pressure.warning_free",
+        )?;
+        let critical = parse_percentage_value(
+            &self.disk_pressure.critical_free,
+            "storage.disk_pressure.critical_free",
+        )?;
+        if critical >= warning {
+            return Err(ConfigError::validation(
+                "storage.disk_pressure",
+                "critical_free must be less than warning_free",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskPressureConfig {
+    #[serde(default = "default_warning_free")]
+    pub warning_free: String,
+    #[serde(default = "default_critical_free")]
+    pub critical_free: String,
+}
+
+impl Default for DiskPressureConfig {
+    fn default() -> Self {
+        Self {
+            warning_free: default_warning_free(),
+            critical_free: default_critical_free(),
+        }
+    }
+}
+
+fn default_warning_free() -> String {
+    "10%".to_owned()
+}
+fn default_critical_free() -> String {
+    "5%".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +556,29 @@ impl Default for RetentionConfig {
 }
 
 impl RetentionConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (name, value) in [
+            ("raw_rounds", &self.raw_rounds),
+            ("rollup_5m", &self.rollup_5m),
+            ("rollup_1h", &self.rollup_1h),
+            ("alert_events", &self.alert_events),
+            ("notification_records", &self.notification_records),
+        ] {
+            if value != "forever" {
+                let duration = parse_duration(value).map_err(|e| {
+                    ConfigError::validation(format!("storage.retention.{name}"), e.to_string())
+                })?;
+                if duration.is_zero() {
+                    return Err(ConfigError::validation(
+                        format!("storage.retention.{name}"),
+                        "retention must be greater than zero",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn parse_raw_retention(&self) -> Option<std::time::Duration> {
         parse_retention(&self.raw_rounds)
     }
@@ -428,6 +638,12 @@ pub struct SchedulerConfig {
     pub tick_interval: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
+    #[serde(default)]
+    pub startup_mode: StartupMode,
+    #[serde(default = "default_jitter")]
+    pub default_jitter: String,
+    #[serde(default)]
+    pub max_concurrent_by_probe: ProbeConcurrencyLimits,
 }
 
 impl Default for SchedulerConfig {
@@ -435,8 +651,78 @@ impl Default for SchedulerConfig {
         Self {
             tick_interval: default_tick_interval(),
             max_concurrent: default_max_concurrent(),
+            startup_mode: StartupMode::default(),
+            default_jitter: default_jitter(),
+            max_concurrent_by_probe: ProbeConcurrencyLimits::default(),
         }
     }
+}
+
+impl SchedulerConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let tick = parse_duration(&self.tick_interval)
+            .map_err(|e| ConfigError::validation("scheduler.tick_interval", e.to_string()))?;
+        if tick.is_zero() {
+            return Err(ConfigError::validation(
+                "scheduler.tick_interval",
+                "must be greater than zero",
+            ));
+        }
+        if self.max_concurrent == 0 {
+            return Err(ConfigError::validation(
+                "scheduler.max_concurrent",
+                "must be greater than zero",
+            ));
+        }
+        parse_percentage_value(&self.default_jitter, "scheduler.default_jitter")?;
+        for (kind, limit) in [
+            ("icmp", self.max_concurrent_by_probe.icmp),
+            ("http", self.max_concurrent_by_probe.http),
+            ("tcp", self.max_concurrent_by_probe.tcp),
+            ("dns", self.max_concurrent_by_probe.dns),
+        ] {
+            if limit == Some(0) {
+                return Err(ConfigError::validation(
+                    format!("scheduler.max_concurrent_by_probe.{kind}"),
+                    "must be greater than zero",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_percentage_value(value: &str, path: &str) -> Result<f64, ConfigError> {
+    let number = value
+        .strip_suffix('%')
+        .ok_or_else(|| ConfigError::validation(path, "must be a percentage such as 10%"))?
+        .parse::<f64>()
+        .map_err(|_| ConfigError::validation(path, "must be a valid percentage"))?;
+    if !(0.0..=100.0).contains(&number) {
+        return Err(ConfigError::validation(path, "must be between 0% and 100%"));
+    }
+    Ok(number / 100.0)
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupMode {
+    #[default]
+    ImmediateThenAligned,
+    Aligned,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeConcurrencyLimits {
+    pub icmp: Option<u32>,
+    pub http: Option<u32>,
+    pub tcp: Option<u32>,
+    pub dns: Option<u32>,
+}
+
+fn default_jitter() -> String {
+    "10%".to_owned()
 }
 
 fn default_tick_interval() -> String {
@@ -484,8 +770,22 @@ impl ProbeProfileConfig {
         };
         parse_duration(interval_str)
             .map_err(|e| ConfigError::validation(format!("{}.interval", path), e.to_string()))?;
-        parse_duration(timeout_str)
+        let interval = parse_duration(interval_str)
+            .map_err(|e| ConfigError::validation(format!("{}.interval", path), e.to_string()))?;
+        if interval.is_zero() {
+            return Err(ConfigError::validation(
+                format!("{}.interval", path),
+                "must be greater than zero",
+            ));
+        }
+        let timeout = parse_duration(timeout_str)
             .map_err(|e| ConfigError::validation(format!("{}.timeout", path), e.to_string()))?;
+        if timeout.is_zero() {
+            return Err(ConfigError::validation(
+                format!("{}.timeout", path),
+                "must be greater than zero",
+            ));
+        }
         Ok(())
     }
 
@@ -541,14 +841,63 @@ impl ProbeProfileConfig {
                 ConfigError::validation(format!("profiles.{}.timeout", self.id()), e.to_string())
             })?,
         };
+        if interval.is_zero() {
+            return Err(ConfigError::validation(
+                format!("{}.interval", check_path),
+                "must be greater than zero",
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(ConfigError::validation(
+                format!("{}.timeout", check_path),
+                "must be greater than zero",
+            ));
+        }
         let probe_params = match self {
             Self::Icmp(p) => {
                 let count = check.count.unwrap_or(p.count);
-                ResolvedProbeParams::Icmp(ResolvedIcmpParams { count })
+                if count == 0 {
+                    return Err(ConfigError::validation(
+                        format!("{}.count", check_path),
+                        "must be greater than zero",
+                    ));
+                }
+                ResolvedProbeParams::Icmp(ResolvedIcmpParams {
+                    count,
+                    address_family: check
+                        .address_family
+                        .as_ref()
+                        .or(p.address_family.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "auto".to_owned()),
+                    payload_size: check.payload_size.or(p.payload_size).unwrap_or(56),
+                    source_address: check
+                        .source_address
+                        .as_ref()
+                        .or(p.source_address.as_ref())
+                        .cloned(),
+                })
             }
             Self::Http(p) => {
                 let url = check.url.as_deref().unwrap_or(&p.url).to_owned();
+                let parsed_url = url::Url::parse(&url).map_err(|error| {
+                    ConfigError::validation(format!("{}.url", check_path), error.to_string())
+                })?;
+                if !matches!(parsed_url.scheme(), "http" | "https") {
+                    return Err(ConfigError::validation(
+                        format!("{}.url", check_path),
+                        "URL scheme must be http or https",
+                    ));
+                }
                 let method = check.method.as_ref().or(p.method.as_ref()).cloned();
+                if let Some(method) = &method
+                    && method.parse::<http::Method>().is_err()
+                {
+                    return Err(ConfigError::validation(
+                        format!("{}.method", check_path),
+                        "invalid HTTP method",
+                    ));
+                }
                 let headers = match (&check.headers, &p.headers) {
                     (Some(override_h), Some(base_h)) => {
                         let mut merged = base_h.clone();
@@ -558,20 +907,79 @@ impl ProbeProfileConfig {
                     (Some(h), None) | (None, Some(h)) => h.clone(),
                     (None, None) => HashMap::new(),
                 };
-                let expected_status = check.expected_status.or(p.expected_status);
+                let expectation = check
+                    .expected_status
+                    .as_ref()
+                    .or(p.expected_status.as_ref());
+                let (expected_status, expected_status_range) = expectation
+                    .map(HttpStatusExpectation::resolve)
+                    .transpose()?
+                    .unwrap_or((None, None));
                 let body = check.body.as_ref().or(p.body.as_ref()).cloned();
+                let body = body.map(|secret| secret.resolve()).transpose()?;
+                let root_certificates = check
+                    .root_certificates
+                    .as_ref()
+                    .or(p.root_certificates.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
                 ResolvedProbeParams::Http(ResolvedHttpParams {
                     url,
                     method,
                     headers,
                     expected_status,
+                    expected_status_range,
                     body,
+                    follow_redirects: check
+                        .follow_redirects
+                        .or(p.follow_redirects)
+                        .unwrap_or(true),
+                    max_redirect_count: check
+                        .max_redirect_count
+                        .or(p.max_redirect_count)
+                        .unwrap_or(10),
+                    connection_mode: check
+                        .connection_mode
+                        .as_ref()
+                        .or(p.connection_mode.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "pooled".to_owned()),
+                    measure_until: check
+                        .measure_until
+                        .as_ref()
+                        .or(p.measure_until.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "headers".to_owned()),
+                    user_agent: check.user_agent.as_ref().or(p.user_agent.as_ref()).cloned(),
+                    tls_validate: check.tls_validate.or(p.tls_validate).unwrap_or(true),
+                    root_certificates,
                 })
             }
             Self::Tcp(p) => {
                 let host = check.host.as_deref().unwrap_or(&p.host).to_owned();
                 let port = check.port.unwrap_or(p.port);
-                ResolvedProbeParams::Tcp(ResolvedTcpParams { host, port })
+                if port == 0 {
+                    return Err(ConfigError::validation(
+                        format!("{}.port", check_path),
+                        "must be between 1 and 65535",
+                    ));
+                }
+                ResolvedProbeParams::Tcp(ResolvedTcpParams {
+                    host,
+                    port,
+                    address_family: check
+                        .address_family
+                        .as_ref()
+                        .or(p.address_family.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "auto".to_owned()),
+                    source_address: check
+                        .source_address
+                        .as_ref()
+                        .or(p.source_address.as_ref())
+                        .cloned(),
+                    tls: check.tls.as_ref().or(p.tls.as_ref()).cloned(),
+                })
             }
             Self::Dns(p) => {
                 let domain = check.domain.as_deref().unwrap_or(&p.domain).to_owned();
@@ -585,17 +993,31 @@ impl ProbeProfileConfig {
                     domain,
                     record_type,
                     resolver,
+                    protocol: check
+                        .protocol
+                        .as_ref()
+                        .or(p.protocol.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "udp".to_owned()),
+                    expected_rcode: check
+                        .expected_rcode
+                        .as_ref()
+                        .or(p.expected_rcode.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| "noerror".to_owned()),
+                    require_answer: check.require_answer.or(p.require_answer).unwrap_or(false),
                 })
             }
         };
-        let revision_input = format!(
-            "{}:{}:{}:{}:{:?}",
-            check.id,
-            self.id(),
-            interval.as_nanos(),
-            timeout.as_nanos(),
-            probe_params,
-        );
+        validate_resolved_probe_params(&probe_params, &check_path)?;
+        let revision_input = serde_json::json!({
+            "check_id": check.id.as_str(),
+            "profile_id": self.id().as_str(),
+            "interval_ns": interval.as_nanos(),
+            "timeout_ns": timeout.as_nanos(),
+            "probe": probe_params,
+        })
+        .to_string();
         let revision_id = compute_revision_id(&revision_input);
         Ok(ResolvedCheckDef {
             check_id: check.id.clone(),
@@ -609,6 +1031,112 @@ impl ProbeProfileConfig {
             probe_params,
         })
     }
+}
+
+fn validate_resolved_probe_params(
+    params: &ResolvedProbeParams,
+    path: &str,
+) -> Result<(), ConfigError> {
+    let validate_family = |family: &str, source: Option<&str>| -> Result<(), ConfigError> {
+        if !["auto", "ipv4", "ipv6"].contains(&family) {
+            return Err(ConfigError::validation(
+                format!("{path}.address_family"),
+                "must be auto, ipv4, or ipv6",
+            ));
+        }
+        if let Some(source) = source {
+            let address = source.parse::<std::net::IpAddr>().map_err(|_| {
+                ConfigError::validation(format!("{path}.source_address"), "must be an IP address")
+            })?;
+            if (family == "ipv4" && !address.is_ipv4()) || (family == "ipv6" && !address.is_ipv6())
+            {
+                return Err(ConfigError::validation(
+                    format!("{path}.source_address"),
+                    "source address is incompatible with address_family",
+                ));
+            }
+        }
+        Ok(())
+    };
+    let validate_certificates = |certificates: &[String]| -> Result<(), ConfigError> {
+        for certificate in certificates {
+            let bytes = std::fs::read(certificate).map_err(|error| {
+                ConfigError::validation(
+                    format!("{path}.root_certificates"),
+                    format!("cannot read {certificate}: {error}"),
+                )
+            })?;
+            if bytes.is_empty() {
+                return Err(ConfigError::validation(
+                    format!("{path}.root_certificates"),
+                    format!("{certificate} is empty"),
+                ));
+            }
+        }
+        Ok(())
+    };
+    match params {
+        ResolvedProbeParams::Icmp(params) => {
+            validate_family(&params.address_family, params.source_address.as_deref())?;
+            if params.payload_size > 65_507 {
+                return Err(ConfigError::validation(
+                    format!("{path}.payload_size"),
+                    "must not exceed 65507 bytes",
+                ));
+            }
+        }
+        ResolvedProbeParams::Http(params) => {
+            if !["pooled", "per_round", "fresh"].contains(&params.connection_mode.as_str()) {
+                return Err(ConfigError::validation(
+                    format!("{path}.connection_mode"),
+                    "must be pooled, per_round, or fresh",
+                ));
+            }
+            if !["headers", "body"].contains(&params.measure_until.as_str()) {
+                return Err(ConfigError::validation(
+                    format!("{path}.measure_until"),
+                    "must be headers or body",
+                ));
+            }
+            validate_certificates(&params.root_certificates)?;
+        }
+        ResolvedProbeParams::Tcp(params) => {
+            validate_family(&params.address_family, params.source_address.as_deref())?;
+            if let Some(tls) = &params.tls
+                && let Some(certificates) = &tls.root_certificates
+            {
+                validate_certificates(certificates)?;
+            }
+        }
+        ResolvedProbeParams::Dns(params) => {
+            if !["udp", "tcp"].contains(&params.protocol.as_str()) {
+                return Err(ConfigError::validation(
+                    format!("{path}.protocol"),
+                    "must be udp or tcp",
+                ));
+            }
+            if ![
+                "noerror", "formerr", "servfail", "nxdomain", "notimp", "refused",
+            ]
+            .contains(&params.expected_rcode.as_str())
+            {
+                return Err(ConfigError::validation(
+                    format!("{path}.expected_rcode"),
+                    "unsupported DNS response code",
+                ));
+            }
+            if let Some(server) = &params.resolver
+                && server.parse::<std::net::IpAddr>().is_err()
+                && server.parse::<std::net::SocketAddr>().is_err()
+            {
+                return Err(ConfigError::validation(
+                    format!("{path}.server"),
+                    "must be an IP address with an optional port",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compute_revision_id(input: &str) -> CheckRevisionId {
@@ -631,6 +1159,9 @@ pub struct IcmpProfileParams {
     pub timeout: String,
     #[serde(default = "default_count")]
     pub count: u32,
+    pub address_family: Option<String>,
+    pub payload_size: Option<usize>,
+    pub source_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -644,8 +1175,15 @@ pub struct HttpProfileParams {
     pub url: String,
     pub method: Option<String>,
     pub headers: Option<HashMap<String, String>>,
-    pub expected_status: Option<u16>,
+    pub expected_status: Option<HttpStatusExpectation>,
     pub body: Option<SecretRef>,
+    pub follow_redirects: Option<bool>,
+    pub max_redirect_count: Option<u32>,
+    pub connection_mode: Option<String>,
+    pub measure_until: Option<String>,
+    pub user_agent: Option<String>,
+    pub tls_validate: Option<bool>,
+    pub root_certificates: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -658,6 +1196,19 @@ pub struct TcpProfileParams {
     pub timeout: String,
     pub host: String,
     pub port: u16,
+    pub address_family: Option<String>,
+    pub source_address: Option<String>,
+    pub tls: Option<TcpTlsConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpTlsConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub server_name: Option<String>,
+    pub tls_validate: Option<bool>,
+    pub root_certificates: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,9 +1219,14 @@ pub struct DnsProfileParams {
     pub interval: String,
     #[serde(default = "default_timeout")]
     pub timeout: String,
+    #[serde(rename = "name", alias = "domain")]
     pub domain: String,
     pub record_type: Option<String>,
+    #[serde(rename = "server", alias = "resolver")]
     pub resolver: Option<String>,
+    pub protocol: Option<String>,
+    pub expected_rcode: Option<String>,
+    pub require_answer: Option<bool>,
 }
 
 fn default_interval() -> String {
@@ -798,6 +1354,8 @@ pub struct AlertRuleConfig {
     #[serde(default)]
     pub minimum_rounds: Option<u32>,
     #[serde(default)]
+    pub minimum_latency_samples: Option<u32>,
+    #[serde(default)]
     pub no_data_period: Option<String>,
 }
 
@@ -876,7 +1434,7 @@ pub struct CheckConfig {
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
     #[serde(default)]
-    pub expected_status: Option<u16>,
+    pub expected_status: Option<HttpStatusExpectation>,
     #[serde(default)]
     pub body: Option<SecretRef>,
     #[serde(default)]
@@ -891,6 +1449,73 @@ pub struct CheckConfig {
     pub resolver: Option<String>,
     #[serde(default)]
     pub count: Option<u32>,
+    #[serde(default)]
+    pub address_family: Option<String>,
+    #[serde(default)]
+    pub payload_size: Option<usize>,
+    #[serde(default)]
+    pub source_address: Option<String>,
+    #[serde(default)]
+    pub follow_redirects: Option<bool>,
+    #[serde(default)]
+    pub max_redirect_count: Option<u32>,
+    #[serde(default)]
+    pub connection_mode: Option<String>,
+    #[serde(default)]
+    pub measure_until: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub tls_validate: Option<bool>,
+    #[serde(default)]
+    pub root_certificates: Option<Vec<String>>,
+    #[serde(default)]
+    pub tls: Option<TcpTlsConfig>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub expected_rcode: Option<String>,
+    #[serde(default)]
+    pub require_answer: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HttpStatusExpectation {
+    Status(u16),
+    Range(String),
+}
+
+type ResolvedHttpStatus = (Option<u16>, Option<(u16, u16)>);
+
+impl HttpStatusExpectation {
+    fn resolve(&self) -> Result<ResolvedHttpStatus, ConfigError> {
+        match self {
+            Self::Status(status) if (100..=599).contains(status) => Ok((Some(*status), None)),
+            Self::Status(_) => Err(ConfigError::validation(
+                "expected_status",
+                "HTTP status must be between 100 and 599",
+            )),
+            Self::Range(value) => {
+                let (start, end) = value.split_once('-').ok_or_else(|| {
+                    ConfigError::validation("expected_status", "status range must use START-END")
+                })?;
+                let start = start.parse::<u16>().map_err(|_| {
+                    ConfigError::validation("expected_status", "invalid status range")
+                })?;
+                let end = end.parse::<u16>().map_err(|_| {
+                    ConfigError::validation("expected_status", "invalid status range")
+                })?;
+                if !(100..=599).contains(&start) || !(100..=599).contains(&end) || start > end {
+                    return Err(ConfigError::validation(
+                        "expected_status",
+                        "status range must be ordered and between 100 and 599",
+                    ));
+                }
+                Ok((None, Some((start, end))))
+            }
+        }
+    }
 }
 
 impl CheckConfig {
@@ -910,6 +1535,23 @@ pub enum SecretRef {
     Literal(String),
     FromEnv { from_env: String },
     FromFile { from_file: String },
+}
+
+impl SecretRef {
+    pub fn resolve(&self) -> Result<String, ConfigError> {
+        match self {
+            Self::Literal(value) => Ok(value.clone()),
+            Self::FromEnv { from_env } => std::env::var(from_env).map_err(|_| {
+                ConfigError::validation(
+                    "secret",
+                    format!("environment variable is not set: {from_env}"),
+                )
+            }),
+            Self::FromFile { from_file } => std::fs::read_to_string(from_file)
+                .map(|value| value.trim_end_matches(['\r', '\n']).to_owned())
+                .map_err(ConfigError::Io),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1474,5 +2116,112 @@ profiles:
 "#;
         let config: KemuriConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resolve_excludes_disabled_targets_and_checks() {
+        let yaml = r#"
+version: 1
+profiles:
+  - kind: icmp
+    id: ping
+targets:
+  - id: disabled-target
+    address: 127.0.0.1
+    enabled: false
+    checks:
+      - id: ping
+        profile: ping
+  - id: enabled-target
+    address: 127.0.0.1
+    checks:
+      - id: disabled-check
+        profile: ping
+        enabled: false
+      - id: enabled-check
+        profile: ping
+"#;
+        let config = KemuriConfig::parse(yaml).unwrap();
+        let resolved = config.resolve().unwrap();
+        assert_eq!(resolved.checks.len(), 1);
+        assert_eq!(resolved.checks[0].check_id.as_str(), "enabled-check");
+    }
+
+    #[test]
+    fn reject_zero_scheduler_values() {
+        for yaml in [
+            "version: 1\nscheduler:\n  tick_interval: 0s\n",
+            "version: 1\nscheduler:\n  max_concurrent: 0\n",
+        ] {
+            assert!(KemuriConfig::parse(yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn resolve_all_probe_options() {
+        let yaml = r#"
+version: 1
+profiles:
+  - kind: icmp
+    id: ping
+    count: 2
+    address_family: ipv4
+    payload_size: 32
+    source_address: 127.0.0.1
+  - kind: http
+    id: web
+    url: https://example.test/
+    method: POST
+    body: payload
+    expected_status: "200-399"
+    follow_redirects: false
+    max_redirect_count: 3
+    connection_mode: per_round
+    measure_until: body
+    user_agent: kemuri-test
+    tls_validate: false
+  - kind: tcp
+    id: socket
+    host: localhost
+    port: 443
+    address_family: ipv4
+    source_address: 127.0.0.1
+    tls:
+      enabled: true
+      server_name: localhost
+  - kind: dns
+    id: resolver
+    name: example.test
+    server: 127.0.0.1:53
+    record_type: AAAA
+    protocol: tcp
+    expected_rcode: nxdomain
+    require_answer: true
+targets:
+  - id: local
+    address: 127.0.0.1
+    checks:
+      - id: ping
+        profile: ping
+      - id: web
+        profile: web
+      - id: socket
+        profile: socket
+      - id: resolver
+        profile: resolver
+"#;
+        let config = KemuriConfig::parse(yaml).unwrap();
+        let resolved = config.resolve().unwrap();
+        assert_eq!(resolved.checks.len(), 4);
+        let http = resolved
+            .checks
+            .iter()
+            .find(|check| check.check_id.as_str() == "web")
+            .unwrap();
+        let ResolvedProbeParams::Http(http) = &http.probe_params else {
+            panic!("expected HTTP parameters");
+        };
+        assert_eq!(http.expected_status_range, Some((200, 399)));
+        assert_eq!(http.measure_until, "body");
     }
 }

@@ -29,6 +29,9 @@ pub struct HttpProbeConfig {
     pub tls_validate: bool,
     pub connection_mode: HttpConnectionMode,
     pub user_agent: Option<String>,
+    pub body: Option<String>,
+    pub measure_until: String,
+    pub root_certificates: Vec<String>,
 }
 
 impl Default for HttpProbeConfig {
@@ -44,22 +47,21 @@ impl Default for HttpProbeConfig {
             tls_validate: true,
             connection_mode: HttpConnectionMode::default(),
             user_agent: None,
+            body: None,
+            measure_until: "headers".to_owned(),
+            root_certificates: Vec::new(),
         }
     }
 }
 
 pub struct HttpProbe {
-    client: Arc<reqwest::Client>,
     config: HttpProbeConfig,
 }
 
 impl HttpProbe {
     pub fn new(config: HttpProbeConfig) -> Result<Self, ProbeExecutionError> {
-        let client = Self::build_client(&config)?;
-        Ok(Self {
-            client: Arc::new(client),
-            config,
-        })
+        Self::build_client(&config)?;
+        Ok(Self { config })
     }
 
     fn build_client(config: &HttpProbeConfig) -> Result<reqwest::Client, ProbeExecutionError> {
@@ -75,14 +77,96 @@ impl HttpProbe {
         if let Some(ref ua) = config.user_agent {
             builder = builder.user_agent(ua);
         }
+        for path in &config.root_certificates {
+            let pem = std::fs::read(path).map_err(|error| {
+                ProbeExecutionError::Tls(format!("cannot read root certificate {path}: {error}"))
+            })?;
+            let certificate = reqwest::Certificate::from_pem(&pem).map_err(|error| {
+                ProbeExecutionError::Tls(format!("invalid root certificate {path}: {error}"))
+            })?;
+            builder = builder.add_root_certificate(certificate);
+        }
 
         builder
             .build()
             .map_err(|e| ProbeExecutionError::Internal(e.to_string()))
     }
 
-    fn make_client_for_round(&self) -> Result<reqwest::Client, ProbeExecutionError> {
-        Self::build_client(&self.config)
+    fn config_for_check(
+        &self,
+        check: &ResolvedCheck,
+    ) -> Result<HttpProbeConfig, ProbeExecutionError> {
+        let mut config = self.config.clone();
+        if let Some(url) = check.params.get("url") {
+            config.url = url.clone();
+        }
+        if config.url.is_empty() {
+            return Err(ProbeExecutionError::Internal(
+                "HTTP check has no configured URL".to_owned(),
+            ));
+        }
+        if let Some(method) = check.params.get("method") {
+            config.method = Some(method.clone());
+        }
+        if let Some(status) = check.params.get("expected_status") {
+            config.expected_status = Some(status.parse().map_err(|_| {
+                ProbeExecutionError::Internal("invalid expected HTTP status".to_owned())
+            })?);
+        }
+        if let Some(range) = check.params.get("expected_status_range") {
+            let (start, end) = range.split_once('-').ok_or_else(|| {
+                ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
+            })?;
+            config.expected_status_range = Some((
+                start.parse().map_err(|_| {
+                    ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
+                })?,
+                end.parse().map_err(|_| {
+                    ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
+                })?,
+            ));
+        }
+        if let Some(headers) = check.params.get("headers") {
+            config.headers = serde_json::from_str(headers)
+                .map_err(|e| ProbeExecutionError::Internal(format!("invalid HTTP headers: {e}")))?;
+        }
+        config.body = check.params.get("body").cloned();
+        config.follow_redirects = check
+            .params
+            .get("follow_redirects")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(config.follow_redirects);
+        config.max_redirects = check
+            .params
+            .get("max_redirect_count")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(config.max_redirects);
+        config.tls_validate = check
+            .params
+            .get("tls_validate")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(config.tls_validate);
+        config.user_agent = check
+            .params
+            .get("user_agent")
+            .cloned()
+            .or(config.user_agent);
+        config.measure_until = check
+            .params
+            .get("measure_until")
+            .cloned()
+            .unwrap_or(config.measure_until);
+        if let Some(certificates) = check.params.get("root_certificates") {
+            config.root_certificates = serde_json::from_str(certificates).map_err(|error| {
+                ProbeExecutionError::Internal(format!("invalid root certificates: {error}"))
+            })?;
+        }
+        config.connection_mode = match check.params.get("connection_mode").map(String::as_str) {
+            Some("per_round") => HttpConnectionMode::PerRound,
+            Some("fresh") => HttpConnectionMode::Fresh,
+            _ => HttpConnectionMode::Pooled,
+        };
+        Ok(config)
     }
 
     fn is_expected_status(&self, status: u16) -> bool {
@@ -150,12 +234,25 @@ impl HttpProbe {
         for (key, value) in &self.config.headers {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
+        if let Some(body) = self.config.body.as_ref() {
+            request_builder = request_builder.body(body.clone());
+        }
 
         let start = std::time::Instant::now();
         match request_builder.send().await {
             Ok(response) => {
-                let elapsed = start.elapsed();
                 let status = response.status().as_u16();
+                if self.config.measure_until == "body"
+                    && let Err(error) = response.bytes().await
+                {
+                    return SampleResult {
+                        outcome: Self::classify_request_error(&error),
+                        latency: None,
+                        detail: Some(error.to_string()),
+                        metadata: None,
+                    };
+                }
+                let elapsed = start.elapsed();
                 if self.is_expected_status(status) {
                     SampleResult {
                         outcome: SampleOutcome::Success,
@@ -173,11 +270,10 @@ impl HttpProbe {
                 }
             }
             Err(err) => {
-                let elapsed = start.elapsed();
                 let outcome = Self::classify_request_error(&err);
                 SampleResult {
                     outcome,
-                    latency: Some(elapsed),
+                    latency: None,
                     detail: Some(err.to_string()),
                     metadata: None,
                 }
@@ -197,13 +293,11 @@ impl Probe for HttpProbe {
         _context: RoundContext,
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
-        let client = match self.config.connection_mode {
-            HttpConnectionMode::Pooled => self.client.clone(),
-            HttpConnectionMode::PerRound => Arc::new(self.make_client_for_round()?),
-            HttpConnectionMode::Fresh => Arc::new(self.make_client_for_round()?),
-        };
+        let effective = self.config_for_check(&check)?;
+        let client = Arc::new(Self::build_client(&effective)?);
 
-        let result = self.execute_single(&client, check.timeout).await;
+        let probe = Self { config: effective };
+        let result = probe.execute_single(&client, check.timeout).await;
 
         Ok(ProbeRound {
             check_id: check.check_id,

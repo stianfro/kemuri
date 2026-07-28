@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams } from '../router';
 import { fetchTarget, type TargetDetail, type CheckSummary } from '../api';
 
 function stateColor(state: string): string {

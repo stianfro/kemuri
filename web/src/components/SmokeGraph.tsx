@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import type { SeriesPoint, SeriesResponse } from '../api';
+import { formatTime } from '../time';
 
 const STRIP_HEIGHT = 16;
 const PADDING = { top: 20, right: 20, bottom: 40, left: 60 };
@@ -28,14 +29,6 @@ function formatLatency(ms: number): string {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}us`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
 }
 
 export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) {
@@ -159,6 +152,60 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     const healthTop = lossTop + STRIP_HEIGHT + 2;
 
     const cellW = plotW / points.length;
+
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index]!;
+      if (point.bucket_status === 'observed') continue;
+      const x = PADDING.left + index * cellW;
+      ctx.fillStyle =
+        point.bucket_status === 'missing'
+          ? 'rgba(107,114,128,0.22)'
+          : 'rgba(245,158,11,0.18)';
+      ctx.fillRect(x, graphTop, cellW + 0.5, healthTop + STRIP_HEIGHT - graphTop);
+      if (point.bucket_status === 'skipped') {
+        ctx.strokeStyle = 'rgba(245,158,11,0.45)';
+        ctx.lineWidth = 1;
+        for (let offset = -graphH; offset < cellW + graphH; offset += 8) {
+          ctx.beginPath();
+          ctx.moveTo(x + offset, healthTop + STRIP_HEIGHT);
+          ctx.lineTo(x + offset + graphH, graphTop);
+          ctx.stroke();
+        }
+      }
+    }
+
+    const timeToX = (timestampMs: number) =>
+      PADDING.left +
+      ((timestampMs - data.from_ms) / Math.max(1, data.to_ms - data.from_ms)) * plotW;
+    const firingByRule = new Map<string, number>();
+    for (const event of data.alert_events) {
+      if (event.event_type === 'firing') {
+        firingByRule.set(event.rule_id, event.timestamp_ms);
+      } else if (event.event_type === 'resolved') {
+        const startedAt = firingByRule.get(event.rule_id);
+        if (startedAt !== undefined) {
+          const startX = timeToX(startedAt);
+          const endX = timeToX(event.timestamp_ms);
+          ctx.fillStyle = 'rgba(239,68,68,0.10)';
+          ctx.fillRect(startX, graphTop, Math.max(1, endX - startX), graphH);
+          firingByRule.delete(event.rule_id);
+        }
+      }
+    }
+    for (const startedAt of firingByRule.values()) {
+      const startX = timeToX(startedAt);
+      ctx.fillStyle = 'rgba(239,68,68,0.10)';
+      ctx.fillRect(startX, graphTop, Math.max(1, PADDING.left + plotW - startX), graphH);
+    }
+    ctx.strokeStyle = 'rgba(59,130,246,0.75)';
+    ctx.lineWidth = 1;
+    for (const marker of data.revision_markers) {
+      const x = timeToX(marker.timestamp_ms);
+      ctx.beginPath();
+      ctx.moveTo(x, graphTop);
+      ctx.lineTo(x, graphBottom);
+      ctx.stroke();
+    }
 
     let globalMaxBin = 0;
     for (const p of points) {
@@ -346,6 +393,16 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
         : '1-hour rollups'
     : '';
 
+  const graphSummary = data
+    ? `${data.points.length} time buckets: ${
+        data.points.filter((point) => point.bucket_status === 'observed').length
+      } observed, ${
+        data.points.filter((point) => point.bucket_status === 'skipped').length
+      } skipped, and ${
+        data.points.filter((point) => point.bucket_status === 'missing').length
+      } missing.`
+    : 'Latency graph is loading.';
+
   return (
     <div ref={containerRef} style={{ width: '100%', position: 'relative' }}>
       <div
@@ -409,10 +466,27 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
       <div style={{ position: 'relative' }}>
         <canvas
           ref={canvasRef}
+          role="img"
+          aria-label={graphSummary}
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
           style={{ display: 'block', borderRadius: 4 }}
         />
+        <p
+          style={{
+            position: 'absolute',
+            width: 1,
+            height: 1,
+            padding: 0,
+            margin: -1,
+            overflow: 'hidden',
+            clip: 'rect(0, 0, 0, 0)',
+            whiteSpace: 'nowrap',
+            border: 0,
+          }}
+        >
+          {graphSummary}
+        </p>
 
         {tooltip && (
           <div

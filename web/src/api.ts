@@ -54,6 +54,8 @@ export interface CheckDetail {
 
 export interface SeriesPoint {
   timestamp: string;
+  timestamp_ms: number;
+  bucket_status: 'observed' | 'skipped' | 'missing';
   rounds_count: number;
   attempted: number;
   latency_bearing: number;
@@ -64,6 +66,10 @@ export interface SeriesPoint {
   p50_latency_ms: number | null;
   p95_latency_ms: number | null;
   max_latency_ms: number | null;
+  min_latency_us: number | null;
+  p50_latency_us: number | null;
+  p95_latency_us: number | null;
+  max_latency_us: number | null;
   measurement_loss_ratio: number;
   health_failure_ratio: number;
   histogram_bins: number[];
@@ -75,11 +81,22 @@ export interface SeriesResponse {
   observer_id: string;
   from: string;
   to: string;
+  from_ms: number;
+  to_ms: number;
   resolution_ms: number;
   source: string;
   quantiles: string;
   histogram_bin_representatives_ms: number[];
   points: SeriesPoint[];
+  alert_events: Array<{
+    timestamp_ms: number;
+    event_type: string;
+    rule_id: string;
+  }>;
+  revision_markers: Array<{
+    timestamp_ms: number;
+    revision_id: string;
+  }>;
 }
 
 export interface SampleDetail {
@@ -217,6 +234,10 @@ export async function fetchRounds(
 
 export async function fetchGroups(): Promise<GroupResponse[]> {
   return fetchJson<GroupResponse[]>(`${BASE}/groups`);
+}
+
+export async function fetchGroup(groupPath: string): Promise<GroupResponse> {
+  return fetchJson<GroupResponse>(`${BASE}/groups/${encodeURIComponent(groupPath)}`);
 }
 
 export async function fetchAlerts(params?: {

@@ -340,8 +340,17 @@ fn classify_state(results: &[SampleResult], execution_status: RoundExecutionStat
             let all_healthy = results
                 .iter()
                 .all(|r| classify_outcome(&r.outcome) == SampleClassification::HealthyResponse);
+            let all_measurement_loss = results
+                .iter()
+                .all(|r| classify_outcome(&r.outcome) == SampleClassification::MeasurementLoss);
 
-            if all_healthy { "healthy" } else { "degraded" }
+            if all_healthy {
+                "healthy"
+            } else if all_measurement_loss {
+                "down"
+            } else {
+                "degraded"
+            }
         }
     }
     .to_owned()

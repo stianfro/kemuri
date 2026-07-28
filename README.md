@@ -78,6 +78,18 @@ See the `version: 1` schema. All probe profiles, notifiers, rules, and targets a
 
 Secret values support `from_env` and `from_file` references to avoid storing credentials in the config file.
 
+Targets and checks can set `enabled: false`. Disabled entries remain in SQLite history, but Kemuri does not schedule them. Check values override profile values. HTTP headers merge by name. List values replace the profile list.
+
+The scheduler starts each enabled check at process startup by default, then uses interval-aligned slots with deterministic jitter. Set `startup_mode: aligned` to omit the startup round. `max_concurrent` is the global round limit. Optional limits under `max_concurrent_by_probe` apply to `icmp`, `http`, `tcp`, and `dns`.
+
+Disk pressure uses hysteresis. Scheduling pauses when free space reaches `storage.disk_pressure.critical_free`. It resumes only after free space exceeds `warning_free`. The defaults are 5 percent and 10 percent.
+
+HTTP checks accept one `expected_status` integer or a range such as `"200-399"`. ICMP checks require Linux ping socket permission or `CAP_NET_RAW`.
+
+Alert states are evaluated only for checks that use the rule profile. A rule can require `minimum_rounds` and `minimum_latency_samples`. Without `clear_threshold`, the clear condition is the logical inverse of the firing condition.
+
+Send `SIGHUP`, or make a same-origin JSON `POST` to `/api/v1/config/reload`, to reload the file. Kemuri validates the new state before it replaces the active state. A failed reload leaves the active configuration in place. Cross-origin reload requests are rejected.
+
 ## API
 
 All endpoints are under `/api/v1/`. Key endpoints:
@@ -91,6 +103,31 @@ All endpoints are under `/api/v1/`. Key endpoints:
 - `GET /healthz` - liveness
 - `GET /readyz` - readiness
 - `GET /metrics` - Prometheus metrics
+- `GET /api/openapi.json` - OpenAPI document
+
+API timestamps use Unix milliseconds and latency values use integer microseconds. Range queries use `from_ms` and `to_ms`. Collection limits are from 1 through 200. Cursor values are opaque.
+
+API errors contain a request ID. The same value is returned in `X-Request-ID`. Unknown API routes return JSON. Missing static assets return a normal HTTP 404.
+
+## Backups
+
+Use `kemuri database backup --config <path> --output <file>` while the service is running. Use `--output -` to write a complete SQLite database image to standard output. Store backups outside the active data directory and test them with `PRAGMA integrity_check`.
+
+## Reverse proxy
+
+Kemuri has no built-in authentication. Run it on a trusted host or behind a trusted reverse proxy. Keep CORS disabled unless another origin must read the API. Configure `server.public_url` when notification links must use the proxy URL. The proxy must support SSE without response buffering for `/api/v1/events`.
+
+## Upgrade from 0.1.0
+
+Version 1 keeps existing SQLite data and applies forward migrations. YAML and HTTP API compatibility with 0.1.0 is not guaranteed. Review renamed timestamp and latency fields, range parameters, status rules, disabled-entry behavior, and reload restrictions before the upgrade.
+
+## Containers
+
+The image runs as the non-root `kemuri` user and stores data in `/var/lib/kemuri`. Grant ICMP capability only when ICMP profiles are configured:
+
+```sh
+docker run --cap-add NET_RAW ...
+```
 
 ## License
 

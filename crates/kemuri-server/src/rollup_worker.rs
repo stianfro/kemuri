@@ -63,7 +63,7 @@ impl RollupWorker {
                 total_processed += processed;
 
                 if total_processed >= BATCH_SIZE as u64 {
-                    tokio::task::yield_now().await;
+                    return Ok(total_processed);
                 }
             }
         }
@@ -78,8 +78,7 @@ impl RollupWorker {
         resolution_seconds: i64,
     ) -> Result<u64, sqlx::Error> {
         let now = Utc::now();
-        let latest_closed_ts =
-            (now.timestamp() / resolution_seconds) * resolution_seconds - resolution_seconds;
+        let latest_closed_ts = (now.timestamp() / resolution_seconds) * resolution_seconds;
         let latest_closed = format_utc_timestamp(latest_closed_ts);
 
         let watermark = RollupRepo::get_latest_bucket_start(

@@ -449,8 +449,25 @@ impl Probe for IcmpProbe {
         _context: RoundContext,
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
-        let (target_ip, is_ipv6) = self.resolve_host(&check.address).await?;
-        let (socket, method) = self.create_socket(is_ipv6)?;
+        let effective = Self::new(IcmpProbeConfig {
+            address_family: match check.params.get("address_family").map(String::as_str) {
+                Some("ipv4") => AddressFamily::Ipv4,
+                Some("ipv6") => AddressFamily::Ipv6,
+                _ => AddressFamily::Auto,
+            },
+            payload_size: check
+                .params
+                .get("payload_size")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.config.payload_size),
+            source_address: check
+                .params
+                .get("source_address")
+                .cloned()
+                .or_else(|| self.config.source_address.clone()),
+        });
+        let (target_ip, is_ipv6) = effective.resolve_host(&check.address).await?;
+        let (socket, method) = effective.create_socket(is_ipv6)?;
         let identifier = std::process::id() as u16;
 
         let sample_count = check.sample_count.max(1);
@@ -463,7 +480,7 @@ impl Probe for IcmpProbe {
             if seq > 0 {
                 tokio::time::sleep(sample_spacing).await;
             }
-            let result = self
+            let result = effective
                 .send_and_receive(
                     &socket,
                     target_ip,

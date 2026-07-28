@@ -334,7 +334,26 @@ impl Probe for DnsProbe {
         let record_type = Self::parse_record_type(record_type_str);
         let server = check.params.get("server").map(|s| s.as_str());
 
-        let result = self
+        let effective = Self::new(DnsProbeConfig {
+            protocol: match check.params.get("protocol").map(String::as_str) {
+                Some("tcp") => DnsProtocol::Tcp,
+                _ => DnsProtocol::Udp,
+            },
+            expected_rcode: match check.params.get("expected_rcode").map(String::as_str) {
+                Some("formerr") => DnsResponseCode::FormErr,
+                Some("servfail") => DnsResponseCode::ServFail,
+                Some("nxdomain") => DnsResponseCode::NXDomain,
+                Some("notimp") => DnsResponseCode::NotImp,
+                Some("refused") => DnsResponseCode::Refused,
+                _ => DnsResponseCode::NoError,
+            },
+            require_answer: check
+                .params
+                .get("require_answer")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.config.require_answer),
+        });
+        let result = effective
             .execute_single(&name, record_type, server, check.timeout)
             .await;
 

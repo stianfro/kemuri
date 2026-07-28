@@ -1,5 +1,6 @@
 import React from 'react';
 import { fetchInfo, fetchSystemStatus, type BuildInfo, type SystemStatus } from '../api';
+import { formatTime } from '../time';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -16,15 +17,6 @@ function formatUptime(seconds: number): string {
   if (hours > 0) parts.push(`${hours}h`);
   parts.push(`${mins}m`);
   return parts.join(' ');
-}
-
-function formatTime(iso: string | null): string {
-  if (!iso) return '-';
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
 }
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams } from '../router';
 import {
   fetchCheck,
   fetchRounds,
@@ -10,6 +10,7 @@ import {
   type AlertState,
 } from '../api';
 import { SmokeGraph } from '../components/SmokeGraph';
+import { formatTime } from '../time';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -44,15 +45,6 @@ function formatLatency(ms: number | null): string {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}us`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatTime(iso: string | null): string {
-  if (!iso) return '-';
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
 }
 
 function MetricCard({ label, value }: { label: string; value: string }) {

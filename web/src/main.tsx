@@ -1,14 +1,21 @@
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, useLocation } from './router';
 import { Overview } from './pages/Overview';
 import { Target } from './pages/Target';
 import { Check } from './pages/Check';
 import { Alerts } from './pages/Alerts';
 import { System } from './pages/System';
+import { Group } from './pages/Group';
 import { fetchAlerts } from './api';
 import { useEffect, useState } from 'react';
 
-function NavBar() {
+function NavBar({
+  timeZone,
+  onTimeZoneChange,
+}: {
+  timeZone: 'local' | 'utc';
+  onTimeZoneChange: (value: 'local' | 'utc') => void;
+}) {
   const location = useLocation();
   const [alertCount, setAlertCount] = useState(0);
 
@@ -37,7 +44,7 @@ function NavBar() {
         alignItems: 'center',
         gap: 0,
         borderBottom: '1px solid var(--border)',
-        padding: '0 16px',
+        padding: '0 8px',
         height: 48,
         background: 'var(--bg-nav)',
         position: 'sticky',
@@ -52,7 +59,7 @@ function NavBar() {
           fontSize: 16,
           color: 'var(--text)',
           textDecoration: 'none',
-          marginRight: 24,
+          marginRight: 8,
         }}
       >
         Kemuri
@@ -65,7 +72,7 @@ function NavBar() {
             key={link.to}
             to={link.to}
             style={{
-              padding: '12px 16px',
+              padding: '12px 8px',
               fontSize: 14,
               fontWeight: active ? 600 : 400,
               color: active ? 'var(--text)' : 'var(--text-muted)',
@@ -96,11 +103,63 @@ function NavBar() {
           </Link>
         );
       })}
+      <button
+        type="button"
+        aria-label="Toggle local and UTC time"
+        onClick={() => onTimeZoneChange(timeZone === 'local' ? 'utc' : 'local')}
+        style={{
+          marginLeft: 'auto',
+          border: '1px solid var(--border)',
+          borderRadius: 4,
+          padding: '5px 8px',
+          background: 'var(--bg-card)',
+          color: 'var(--text)',
+        }}
+      >
+        {timeZone === 'local' ? 'Local time' : 'UTC'}
+      </button>
     </nav>
   );
 }
 
+function SystemEventBridge() {
+  useEffect(() => {
+    const stream = new EventSource('/api/v1/events');
+    let disconnected = false;
+    let refresh: number | undefined;
+    const scheduleRefresh = () => {
+      window.clearTimeout(refresh);
+      refresh = window.setTimeout(() => window.location.reload(), 250);
+    };
+    for (const eventType of [
+      'round.completed',
+      'check.state_changed',
+      'alert.firing',
+      'alert.resolved',
+      'config.reloaded',
+      'system.status_changed',
+    ]) {
+      stream.addEventListener(eventType, scheduleRefresh);
+    }
+    stream.onerror = () => {
+      disconnected = true;
+    };
+    stream.onopen = () => {
+      if (disconnected) scheduleRefresh();
+      disconnected = false;
+    };
+    return () => {
+      window.clearTimeout(refresh);
+      stream.close();
+    };
+  }, []);
+  return null;
+}
+
 function App() {
+  const [timeZone, setTimeZone] = useState<'local' | 'utc'>(() =>
+    window.localStorage.getItem('kemuri-time-zone') === 'utc' ? 'utc' : 'local',
+  );
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       return 'dark';
@@ -114,6 +173,9 @@ function App() {
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
   }, []);
+  useEffect(() => {
+    window.localStorage.setItem('kemuri-time-zone', timeZone);
+  }, [timeZone]);
 
   const colors =
     theme === 'dark'
@@ -155,11 +217,13 @@ function App() {
       } as React.CSSProperties}
     >
       <BrowserRouter>
-        <NavBar />
+        <SystemEventBridge />
+        <NavBar timeZone={timeZone} onTimeZoneChange={setTimeZone} />
         <div style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
           <Routes>
             <Route path="/" element={<Overview />} />
             <Route path="/targets/:targetId" element={<Target />} />
+            <Route path="/groups/:groupPath" element={<Group />} />
             <Route path="/targets/:targetId/checks/:checkId" element={<Check />} />
             <Route path="/alerts" element={<Alerts />} />
             <Route path="/system" element={<System />} />

@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::http::header::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
@@ -16,11 +17,19 @@ pub struct ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.code.as_str() {
-            "target_not_found" | "check_not_found" | "alert_not_found" => StatusCode::NOT_FOUND,
+            "target_not_found" | "check_not_found" | "alert_not_found" | "group_not_found"
+            | "route_not_found" => StatusCode::NOT_FOUND,
             "bad_request" | "invalid_params" => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(self)).into_response()
+        let request_id = self.request_id.clone();
+        let mut response = (status, Json(self)).into_response();
+        if let Ok(value) = HeaderValue::from_str(&request_id) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("x-request-id"), value);
+        }
+        response
     }
 }
 
@@ -36,12 +45,20 @@ fn not_found(code: &str, message: &str) -> ApiError {
     }
 }
 
+pub(crate) fn not_found_public(code: &str, message: &str) -> ApiError {
+    not_found(code, message)
+}
+
 fn bad_request(message: &str) -> ApiError {
     ApiError {
         code: "bad_request".to_owned(),
         message: message.to_owned(),
         request_id: make_request_id(),
     }
+}
+
+pub(crate) fn bad_request_public(message: &str) -> ApiError {
+    bad_request(message)
 }
 
 fn internal_error(e: impl std::fmt::Display) -> ApiError {
@@ -219,6 +236,7 @@ pub struct AlertEventResponse {
     pub metric_value: Option<f64>,
     pub threshold_value: Option<f64>,
     pub occurred_at: String,
+    pub timestamp_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,7 +249,7 @@ pub async fn list_alert_events(
     Query(query): Query<AlertEventsQuery>,
 ) -> Result<Json<AlertEventsResponse>, ApiError> {
     let pool = state.pool.clone();
-    let limit = query.limit.unwrap_or(100).min(500);
+    let limit = validate_limit(query.limit, 100)?;
 
     let events = if let Some(ref rule_id) = query.rule_id {
         kemuri_storage::AlertEventRepo::list_by_rule(&pool, rule_id, limit)
@@ -306,6 +324,7 @@ pub async fn list_alert_events(
             metric_value: event.metric_value,
             threshold_value: event.threshold_value,
             occurred_at: event.occurred_at.clone(),
+            timestamp_ms: timestamp_millis(&event.occurred_at),
         });
     }
 
@@ -341,16 +360,25 @@ pub async fn list_targets(
 
     let rows = kemuri_storage::TargetRepo::list_with_state(&pool, observer_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?;
+        .map_err(internal_error)?;
 
     let mut target_map: std::collections::HashMap<String, Vec<TargetSummary>> =
         std::collections::HashMap::new();
     let mut all_targets: Vec<TargetSummary> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut counts = std::collections::HashMap::new();
+    let mut worst_states: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        *counts.entry(row.target_id.clone()).or_insert(0usize) += 1;
+        let candidate = row.state.as_deref().unwrap_or("no_data");
+        let current = worst_states
+            .entry(row.target_id.clone())
+            .or_insert_with(|| candidate.to_owned());
+        if state_rank(candidate) > state_rank(current) {
+            *current = candidate.to_owned();
+        }
+    }
 
     for row in &rows {
         if seen.insert(row.target_id.clone()) {
@@ -359,13 +387,16 @@ pub async fn list_targets(
             } else {
                 row.group_path.clone()
             };
-            let state_str = row.state.as_deref().unwrap_or("no_data");
+            let state_str = worst_states
+                .get(&row.target_id)
+                .map(String::as_str)
+                .unwrap_or("no_data");
             let summary = TargetSummary {
                 target_id: row.target_id.clone(),
                 name: row.name.clone(),
                 group_path: group.clone(),
                 state: state_str.to_owned(),
-                checks_count: 0,
+                checks_count: counts.get(&row.target_id).copied().unwrap_or(0),
             };
             target_map.entry(group).or_default().push(summary.clone());
             all_targets.push(summary);
@@ -386,12 +417,23 @@ pub async fn list_targets(
     }))
 }
 
+fn state_rank(state: &str) -> u8 {
+    match state {
+        "down" => 4,
+        "degraded" => 3,
+        "no_data" | "unknown" => 2,
+        "healthy" => 1,
+        _ => 0,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckSummary {
     pub check_id: String,
     pub probe_type: String,
     pub state: String,
     pub last_latency_ms: Option<f64>,
+    pub last_latency_us: Option<i64>,
     pub measurement_loss_ratio: Option<f64>,
 }
 
@@ -414,20 +456,12 @@ pub async fn get_target(
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| not_found("target_not_found", "The requested target does not exist"))?;
 
     let checks = kemuri_storage::CheckRepo::list_with_state(&pool, target.internal_id, observer_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?;
+        .map_err(internal_error)?;
 
     let check_summaries: Vec<CheckSummary> = checks
         .iter()
@@ -436,6 +470,7 @@ pub async fn get_target(
             probe_type: c.probe_type.clone(),
             state: c.state.as_deref().unwrap_or("no_data").to_owned(),
             last_latency_ms: c.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+            last_latency_us: c.last_latency_ns.map(|ns| ns / 1_000),
             measurement_loss_ratio: c.last_measurement_loss_ratio,
         })
         .collect();
@@ -471,9 +506,11 @@ pub struct CheckDetail {
     pub probe_type: String,
     pub state: String,
     pub last_latency_ms: Option<f64>,
+    pub last_latency_us: Option<i64>,
     pub measurement_loss_ratio: Option<f64>,
     pub health_failure_ratio: Option<f64>,
     pub last_round_at: Option<String>,
+    pub last_round_timestamp_ms: Option<i64>,
     pub observer_id: String,
 }
 
@@ -486,20 +523,12 @@ pub async fn list_checks(
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| not_found("target_not_found", "The requested target does not exist"))?;
 
     let checks = kemuri_storage::CheckRepo::list_with_state(&pool, target.internal_id, observer_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?;
+        .map_err(internal_error)?;
 
     let summaries: Vec<CheckSummary> = checks
         .iter()
@@ -508,6 +537,7 @@ pub async fn list_checks(
             probe_type: c.probe_type.clone(),
             state: c.state.as_deref().unwrap_or("no_data").to_owned(),
             last_latency_ms: c.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+            last_latency_us: c.last_latency_ns.map(|ns| ns / 1_000),
             measurement_loss_ratio: c.last_measurement_loss_ratio,
         })
         .collect();
@@ -524,11 +554,7 @@ pub async fn get_check(
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| not_found("target_not_found", "The requested target does not exist"))?;
 
     let check = kemuri_storage::CheckRepo::get_with_state(
@@ -538,11 +564,7 @@ pub async fn get_check(
         observer_id,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?
+    .map_err(internal_error)?
     .ok_or_else(|| not_found("check_not_found", "The requested check does not exist"))?;
 
     Ok(Json(CheckDetail {
@@ -551,8 +573,10 @@ pub async fn get_check(
         probe_type: check.probe_type,
         state: check.state.as_deref().unwrap_or("no_data").to_owned(),
         last_latency_ms: check.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+        last_latency_us: check.last_latency_ns.map(|ns| ns / 1_000),
         measurement_loss_ratio: check.last_measurement_loss_ratio,
         health_failure_ratio: check.last_health_failure_ratio,
+        last_round_timestamp_ms: check.last_round_at.as_deref().map(timestamp_millis),
         last_round_at: check.last_round_at,
         observer_id: "local".to_owned(),
     }))
@@ -560,14 +584,18 @@ pub async fn get_check(
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeriesQuery {
-    pub from: String,
-    pub to: String,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub from: Option<String>,
+    pub to: Option<String>,
     pub max_points: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SeriesPoint {
     pub timestamp: String,
+    pub timestamp_ms: i64,
+    pub bucket_status: String,
     pub rounds_count: usize,
     pub attempted: i64,
     pub latency_bearing: i64,
@@ -578,6 +606,10 @@ pub struct SeriesPoint {
     pub p50_latency_ms: Option<f64>,
     pub p95_latency_ms: Option<f64>,
     pub max_latency_ms: Option<f64>,
+    pub min_latency_us: Option<i64>,
+    pub p50_latency_us: Option<i64>,
+    pub p95_latency_us: Option<i64>,
+    pub max_latency_us: Option<i64>,
     pub measurement_loss_ratio: f64,
     pub health_failure_ratio: f64,
     pub histogram_bins: Vec<u64>,
@@ -590,11 +622,28 @@ pub struct SeriesResponse {
     pub observer_id: String,
     pub from: String,
     pub to: String,
+    pub from_ms: i64,
+    pub to_ms: i64,
     pub resolution_ms: i64,
     pub source: String,
     pub quantiles: String,
     pub histogram_bin_representatives_ms: Vec<f64>,
     pub points: Vec<SeriesPoint>,
+    pub alert_events: Vec<SeriesAlertEvent>,
+    pub revision_markers: Vec<SeriesRevisionMarker>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeriesAlertEvent {
+    pub timestamp_ms: i64,
+    pub event_type: String,
+    pub rule_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeriesRevisionMarker {
+    pub timestamp_ms: i64,
+    pub revision_id: String,
 }
 
 pub async fn get_series(
@@ -605,20 +654,22 @@ pub async fn get_series(
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
 
-    let max_points = query.max_points.unwrap_or(1000).min(5000);
+    let max_points = query.max_points.unwrap_or(1000);
+    if !(1..=5000).contains(&max_points) {
+        return Err(bad_request("max_points must be between 1 and 5000"));
+    }
 
-    let from_time = chrono::DateTime::parse_from_rfc3339(&query.from)
-        .map_err(|_| bad_request("invalid 'from' parameter, expected ISO 8601 format"))?;
-    let to_time = chrono::DateTime::parse_from_rfc3339(&query.to)
-        .map_err(|_| bad_request("invalid 'to' parameter, expected ISO 8601 format"))?;
+    let from_time = parse_range_time(query.from_ms, query.from.as_deref(), "from_ms")?;
+    let to_time = parse_range_time(query.to_ms, query.to.as_deref(), "to_ms")?;
+    if from_time >= to_time {
+        return Err(bad_request("from_ms must be less than to_ms"));
+    }
+    let from_string = from_time.to_rfc3339();
+    let to_string = to_time.to_rfc3339();
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| not_found("target_not_found", "The requested target does not exist"))?;
 
     let check = kemuri_storage::CheckRepo::get_with_state(
@@ -628,11 +679,7 @@ pub async fn get_series(
         observer_id,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?
+    .map_err(internal_error)?
     .ok_or_else(|| not_found("check_not_found", "The requested check does not exist"))?;
 
     let range_secs = (to_time - from_time).num_seconds().max(1) as u64;
@@ -641,15 +688,11 @@ pub async fn get_series(
         &pool,
         check.internal_id,
         observer_id,
-        &query.from,
-        &query.to,
+        &from_string,
+        &to_string,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })? as u64;
+    .map_err(internal_error)? as u64;
 
     let threshold = (max_points as u64 * 3) / 2;
 
@@ -689,19 +732,76 @@ pub async fn get_series(
         .iter()
         .map(|&ns| ns as f64 / 1_000_000.0)
         .collect();
+    let alert_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT occurred_at, event_type, rule_id FROM alert_events
+         WHERE check_internal_id = ? AND occurred_at >= ? AND occurred_at < ?
+         ORDER BY occurred_at",
+    )
+    .bind(check.internal_id)
+    .bind(&from_string)
+    .bind(&to_string)
+    .fetch_all(&pool)
+    .await
+    .map_err(internal_error)?;
+    let revision_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', effective_at), revision_id FROM check_revisions
+         WHERE check_internal_id = ? AND effective_at >= ? AND effective_at < ?
+         ORDER BY effective_at",
+    )
+    .bind(check.internal_id)
+    .bind(&from_string)
+    .bind(&to_string)
+    .fetch_all(&pool)
+    .await
+    .map_err(internal_error)?;
 
     Ok(Json(SeriesResponse {
         target_id,
         check_id,
         observer_id: "local".to_owned(),
-        from: query.from,
-        to: query.to,
+        from: from_string,
+        to: to_string,
+        from_ms: from_time.timestamp_millis(),
+        to_ms: to_time.timestamp_millis(),
         resolution_ms: resolution_secs * 1000,
         source: source.to_owned(),
         quantiles: quantiles.to_owned(),
         histogram_bin_representatives_ms: bin_reps_ms,
         points,
+        alert_events: alert_rows
+            .into_iter()
+            .map(|(timestamp, event_type, rule_id)| SeriesAlertEvent {
+                timestamp_ms: timestamp_millis(&timestamp),
+                event_type,
+                rule_id,
+            })
+            .collect(),
+        revision_markers: revision_rows
+            .into_iter()
+            .map(|(timestamp, revision_id)| SeriesRevisionMarker {
+                timestamp_ms: timestamp_millis(&timestamp),
+                revision_id,
+            })
+            .collect(),
     }))
+}
+
+fn parse_range_time(
+    milliseconds: Option<i64>,
+    legacy: Option<&str>,
+    name: &str,
+) -> Result<chrono::DateTime<chrono::FixedOffset>, ApiError> {
+    if let Some(milliseconds) = milliseconds {
+        return chrono::DateTime::from_timestamp_millis(milliseconds)
+            .map(|value| value.fixed_offset())
+            .ok_or_else(|| bad_request(&format!("invalid '{name}' parameter")));
+    }
+    legacy
+        .ok_or_else(|| bad_request(&format!("missing '{name}' parameter")))
+        .and_then(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| bad_request(&format!("invalid '{name}' parameter")))
+        })
 }
 
 async fn build_series_from_raw(
@@ -723,11 +823,7 @@ async fn build_series_from_raw(
         &to_str,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?;
+    .map_err(internal_error)?;
 
     let time_range = (*to_time - *from_time).num_seconds().max(1) as u64;
     let bucket_secs = (time_range / max_points as u64).max(1);
@@ -743,7 +839,7 @@ async fn build_series_from_raw(
         }
     }
 
-    let points: Vec<SeriesPoint> = buckets
+    let observed_points: Vec<SeriesPoint> = buckets
         .iter()
         .map(|(idx, bucket_rounds)| {
             let timestamp_secs = from_time.timestamp() + idx * bucket_secs as i64;
@@ -814,7 +910,18 @@ async fn build_series_from_raw(
             };
 
             SeriesPoint {
+                timestamp_ms: chrono::DateTime::parse_from_rfc3339(&timestamp)
+                    .map(|value| value.timestamp_millis())
+                    .unwrap_or_default(),
                 timestamp,
+                bucket_status: if bucket_rounds.iter().all(|round| {
+                    round.execution_status.starts_with("skipped")
+                        || round.execution_status == "cancelled"
+                }) {
+                    "skipped".to_owned()
+                } else {
+                    "observed".to_owned()
+                },
                 rounds_count: bucket_rounds.len(),
                 attempted,
                 latency_bearing,
@@ -825,6 +932,10 @@ async fn build_series_from_raw(
                 p50_latency_ms: p50,
                 p95_latency_ms: p95,
                 max_latency_ms: max_lat,
+                min_latency_us: min_lat.map(|value| (value * 1000.0) as i64),
+                p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
+                p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
+                max_latency_us: max_lat.map(|value| (value * 1000.0) as i64),
                 measurement_loss_ratio: ml_ratio,
                 health_failure_ratio: hf_ratio,
                 histogram_bins: histogram.bins().to_vec(),
@@ -832,7 +943,48 @@ async fn build_series_from_raw(
         })
         .collect();
 
+    let mut by_timestamp: std::collections::HashMap<i64, SeriesPoint> = observed_points
+        .into_iter()
+        .map(|point| (point.timestamp_ms, point))
+        .collect();
+    let bucket_count = time_range.div_ceil(bucket_secs).min(max_points as u64);
+    let mut points = Vec::with_capacity(bucket_count as usize);
+    for index in 0..bucket_count {
+        let timestamp_ms = from_time.timestamp() * 1000 + (index * bucket_secs * 1000) as i64;
+        points.push(
+            by_timestamp
+                .remove(&timestamp_ms)
+                .unwrap_or_else(|| empty_series_point(timestamp_ms)),
+        );
+    }
     Ok(points)
+}
+
+fn empty_series_point(timestamp_ms: i64) -> SeriesPoint {
+    SeriesPoint {
+        timestamp: chrono::DateTime::from_timestamp_millis(timestamp_ms)
+            .unwrap_or_default()
+            .to_rfc3339(),
+        timestamp_ms,
+        bucket_status: "missing".to_owned(),
+        rounds_count: 0,
+        attempted: 0,
+        latency_bearing: 0,
+        healthy: 0,
+        unhealthy: 0,
+        measurement_lost: 0,
+        min_latency_ms: None,
+        p50_latency_ms: None,
+        p95_latency_ms: None,
+        max_latency_ms: None,
+        min_latency_us: None,
+        p50_latency_us: None,
+        p95_latency_us: None,
+        max_latency_us: None,
+        measurement_loss_ratio: 0.0,
+        health_failure_ratio: 0.0,
+        histogram_bins: vec![0; kemuri_core::Histogram::bin_representatives().len()],
+    }
 }
 
 async fn build_series_from_rollups(
@@ -856,11 +1008,7 @@ async fn build_series_from_rollups(
         &to_str,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?;
+    .map_err(internal_error)?;
 
     if rollups.len() <= max_points as usize {
         let points: Vec<SeriesPoint> = rollups.iter().map(rollup_to_series_point).collect();
@@ -903,7 +1051,15 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
     };
 
     SeriesPoint {
+        timestamp_ms: chrono::DateTime::parse_from_rfc3339(&r.bucket_start)
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_default(),
         timestamp: r.bucket_start.clone(),
+        bucket_status: if r.completed_rounds + r.partial_rounds == 0 {
+            "skipped".to_owned()
+        } else {
+            "observed".to_owned()
+        },
         rounds_count: r.scheduled_rounds as usize,
         attempted: r.attempted_samples,
         latency_bearing: r.latency_bearing_samples,
@@ -914,6 +1070,10 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
         p50_latency_ms: p50,
         p95_latency_ms: p95,
         max_latency_ms: r.max_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+        min_latency_us: r.min_latency_ns.map(|ns| ns / 1_000),
+        p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
+        p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
+        max_latency_us: r.max_latency_ns.map(|ns| ns / 1_000),
         measurement_loss_ratio: ml_ratio,
         health_failure_ratio: hf_ratio,
         histogram_bins: histogram.bins().to_vec(),
@@ -974,7 +1134,15 @@ fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
     };
 
     SeriesPoint {
+        timestamp_ms: chrono::DateTime::parse_from_rfc3339(&first.bucket_start)
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_default(),
         timestamp: first.bucket_start.clone(),
+        bucket_status: if total_attempted == 0 {
+            "skipped".to_owned()
+        } else {
+            "observed".to_owned()
+        },
         rounds_count: total_rounds,
         attempted: total_attempted,
         latency_bearing: total_latency_bearing,
@@ -985,6 +1153,10 @@ fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
         p50_latency_ms: p50,
         p95_latency_ms: p95,
         max_latency_ms: max_lat.map(|ns| ns as f64 / 1_000_000.0),
+        min_latency_us: min_lat.map(|ns| ns / 1_000),
+        p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
+        p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
+        max_latency_us: max_lat.map(|ns| ns / 1_000),
         measurement_loss_ratio: ml_ratio,
         health_failure_ratio: hf_ratio,
         histogram_bins: histogram.bins().to_vec(),
@@ -1009,12 +1181,14 @@ pub struct RoundsQuery {
 pub struct SampleDetail {
     pub outcome: String,
     pub latency_ms: Option<f64>,
+    pub latency_us: Option<i64>,
     pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RoundSummary {
     pub scheduled_at: String,
+    pub timestamp_ms: i64,
     pub execution_status: String,
     pub stop_reason: Option<String>,
     pub attempted_samples: i32,
@@ -1023,6 +1197,8 @@ pub struct RoundSummary {
     pub measurement_loss_samples: i32,
     pub min_latency_ms: Option<f64>,
     pub max_latency_ms: Option<f64>,
+    pub min_latency_us: Option<i64>,
+    pub max_latency_us: Option<i64>,
     pub outcome_summary: Option<String>,
     pub samples: Vec<SampleDetail>,
 }
@@ -1040,15 +1216,12 @@ pub async fn get_rounds(
 ) -> Result<Json<RoundsResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
-    let limit = query.limit.unwrap_or(50).min(200);
+    let limit = validate_limit(query.limit, 50)?;
+    let decoded_cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| not_found("target_not_found", "The requested target does not exist"))?;
 
     let check = kemuri_storage::CheckRepo::get_with_state(
@@ -1058,11 +1231,7 @@ pub async fn get_rounds(
         observer_id,
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?
+    .map_err(internal_error)?
     .ok_or_else(|| not_found("check_not_found", "The requested check does not exist"))?;
 
     let rounds = kemuri_storage::RoundRepo::query_recent_by_check(
@@ -1070,14 +1239,10 @@ pub async fn get_rounds(
         check.internal_id,
         observer_id,
         limit + 1,
-        query.cursor.as_deref(),
+        decoded_cursor.as_deref(),
     )
     .await
-    .map_err(|e| ApiError {
-        code: "internal_error".to_owned(),
-        message: e.to_string(),
-        request_id: make_request_id(),
-    })?;
+    .map_err(internal_error)?;
 
     let has_more = rounds.len() > limit as usize;
     let rounds = if has_more {
@@ -1092,6 +1257,7 @@ pub async fn get_rounds(
             let samples = decode_sample_details(r.sample_blob.as_deref());
             RoundSummary {
                 scheduled_at: r.scheduled_at.clone(),
+                timestamp_ms: timestamp_millis(&r.scheduled_at),
                 execution_status: r.execution_status.clone(),
                 stop_reason: r.stop_reason.clone(),
                 attempted_samples: r.attempted_samples,
@@ -1100,6 +1266,8 @@ pub async fn get_rounds(
                 measurement_loss_samples: r.measurement_loss_samples,
                 min_latency_ms: r.min_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
                 max_latency_ms: r.max_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+                min_latency_us: r.min_latency_ns.map(|ns| ns / 1_000),
+                max_latency_us: r.max_latency_ns.map(|ns| ns / 1_000),
                 outcome_summary: r.outcome_summary.clone(),
                 samples,
             }
@@ -1107,7 +1275,9 @@ pub async fn get_rounds(
         .collect();
 
     let next_cursor = if has_more {
-        rounds.last().map(|r| r.scheduled_at.clone())
+        rounds
+            .last()
+            .map(|r| hex::encode(r.scheduled_at.as_bytes()))
     } else {
         None
     };
@@ -1116,6 +1286,25 @@ pub async fn get_rounds(
         rounds: summaries,
         next_cursor,
     }))
+}
+
+fn validate_limit(value: Option<i64>, default: i64) -> Result<i64, ApiError> {
+    let limit = value.unwrap_or(default);
+    if !(1..=200).contains(&limit) {
+        return Err(bad_request("limit must be between 1 and 200"));
+    }
+    Ok(limit)
+}
+
+fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
+    let bytes = hex::decode(cursor).map_err(|_| bad_request("invalid cursor"))?;
+    String::from_utf8(bytes).map_err(|_| bad_request("invalid cursor"))
+}
+
+fn timestamp_millis(value: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.timestamp_millis())
+        .unwrap_or_default()
 }
 
 fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
@@ -1152,6 +1341,7 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
             SampleDetail {
                 outcome: format!("{:?}", rec.outcome),
                 latency_ms: rec.latency_ns.map(|ns| ns as f64 / 1_000_000.0),
+                latency_us: rec.latency_ns.map(|ns| (ns / 1_000) as i64),
                 metadata,
             }
         })
@@ -1161,49 +1351,20 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
 pub async fn list_groups(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<GroupResponse>>, ApiError> {
-    let pool = state.pool.clone();
-    let observer_id = state.observer_internal_id;
+    Ok(Json(list_targets(State(state)).await?.0.groups))
+}
 
-    let rows = kemuri_storage::TargetRepo::list_with_state(&pool, observer_id)
-        .await
-        .map_err(|e| ApiError {
-            code: "internal_error".to_owned(),
-            message: e.to_string(),
-            request_id: make_request_id(),
-        })?;
-
-    let mut group_map: std::collections::HashMap<String, Vec<TargetSummary>> =
-        std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for row in &rows {
-        if seen.insert(row.target_id.clone()) {
-            let group = if row.group_path.is_empty() {
-                "default".to_owned()
-            } else {
-                row.group_path.clone()
-            };
-            let state_str = row.state.as_deref().unwrap_or("no_data");
-            let summary = TargetSummary {
-                target_id: row.target_id.clone(),
-                name: row.name.clone(),
-                group_path: group.clone(),
-                state: state_str.to_owned(),
-                checks_count: 0,
-            };
-            group_map.entry(group).or_default().push(summary);
-        }
-    }
-
-    let groups: Vec<GroupResponse> = group_map
+pub async fn get_group(
+    State(state): State<AppState>,
+    Path(group_path): Path<String>,
+) -> Result<Json<GroupResponse>, ApiError> {
+    let groups = list_groups(State(state)).await?.0;
+    let decoded = group_path.trim_matches('/');
+    groups
         .into_iter()
-        .map(|(group_path, targets)| GroupResponse {
-            group_path,
-            targets,
-        })
-        .collect();
-
-    Ok(Json(groups))
+        .find(|group| group.group_path == decoded)
+        .map(Json)
+        .ok_or_else(|| not_found("group_not_found", "The requested group does not exist"))
 }
 
 #[cfg(test)]

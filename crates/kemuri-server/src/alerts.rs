@@ -90,13 +90,23 @@ impl AlertEvaluator {
         }
 
         let config = self.config.read().unwrap().clone();
+        let configured_check = config
+            .targets
+            .iter()
+            .find(|target| target.id == notif.target_id)
+            .and_then(|target| {
+                target
+                    .checks
+                    .iter()
+                    .find(|check| check.id == notif.check_id && check.enabled)
+            });
+        let Some(configured_check) = configured_check else {
+            return Ok(());
+        };
         let applicable_rules: Vec<&AlertRuleConfig> = config
             .rules
             .iter()
-            .filter(|r| {
-                let profile = config.profiles.iter().find(|p| p.id() == &r.profile);
-                profile.is_some_and(|p| p.kind().to_string() == check_row.probe_type)
-            })
+            .filter(|rule| rule.profile == configured_check.profile)
             .collect();
 
         for rule in applicable_rules {
@@ -130,6 +140,14 @@ impl AlertEvaluator {
             };
 
             for (check_internal_id, _probe_type) in &active_checks {
+                let profile_id: Option<(Option<String>,)> =
+                    sqlx::query_as("SELECT profile_id FROM checks WHERE internal_id = ?")
+                        .bind(check_internal_id)
+                        .fetch_optional(self.pool.as_ref())
+                        .await?;
+                if profile_id.and_then(|row| row.0).as_deref() != Some(rule.profile.as_str()) {
+                    continue;
+                }
                 let period = rule
                     .no_data_period
                     .as_deref()
@@ -309,6 +327,13 @@ impl AlertEvaluator {
 
         let minimum_rounds = rule.minimum_rounds.unwrap_or(1) as usize;
         if rounds.len() < minimum_rounds {
+            return Ok(());
+        }
+        let latency_samples: i64 = rounds
+            .iter()
+            .map(|round| i64::from(round.latency_bearing_samples))
+            .sum();
+        if latency_samples < rule.minimum_latency_samples.unwrap_or(0) as i64 {
             return Ok(());
         }
 
@@ -970,12 +995,8 @@ fn should_repeat_notification(
     elapsed >= required
 }
 
-fn invert_threshold(threshold: f64, operator: &str) -> f64 {
-    match operator {
-        "gt" | "gte" => threshold * 0.9,
-        "lt" | "lte" => threshold * 1.1,
-        _ => threshold,
-    }
+fn invert_threshold(threshold: f64, _operator: &str) -> f64 {
+    threshold
 }
 
 fn invert_operator(operator: &str) -> &'static str {
@@ -1054,7 +1075,7 @@ mod tests {
     #[test]
     fn invert_threshold_gte() {
         let val = invert_threshold(0.1, "gte");
-        assert!((val - 0.09).abs() < f64::EPSILON);
+        assert!((val - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1266,6 +1287,7 @@ mod tests {
             clear_operator: None,
             repeat_every: None,
             minimum_rounds: None,
+            minimum_latency_samples: None,
             no_data_period: None,
         }
     }
@@ -1289,6 +1311,7 @@ mod tests {
             clear_operator: None,
             repeat_every: Some(repeat.to_owned()),
             minimum_rounds: None,
+            minimum_latency_samples: None,
             no_data_period: None,
         }
     }
@@ -1312,6 +1335,7 @@ mod tests {
             clear_operator: None,
             repeat_every: None,
             minimum_rounds: None,
+            minimum_latency_samples: None,
             no_data_period: None,
         }
     }

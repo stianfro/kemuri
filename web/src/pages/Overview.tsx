@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from '../router';
 import { fetchTargets, fetchAlerts, type TargetsResponse, type GroupResponse, type TargetSummary } from '../api';
 
 function stateColor(state: string): string {
@@ -158,7 +158,12 @@ export function Overview() {
               fontSize: 16,
             }}
           >
-            {group.group_path}
+            <Link
+              to={`/groups/${encodeURIComponent(group.group_path)}`}
+              style={{ color: 'inherit', textDecoration: 'none' }}
+            >
+              {group.group_path}
+            </Link>
           </h3>
           <table
             style={{

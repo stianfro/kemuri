@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
             config,
             test_notifiers,
         } => {
-            run_doctor(config.as_deref(), test_notifiers)?;
+            run_doctor(config.as_deref(), test_notifiers).await?;
         }
         Commands::Notify { command } => match command {
             NotifyCommands::Test {
@@ -162,12 +162,18 @@ async fn run_database_backup(config_path: Option<&std::path::Path>, output: &str
         .await?;
 
     if output == "-" {
-        let row: (String,) =
-            sqlx::query_as("SELECT group_concat(sql, ';') FROM sqlite_master WHERE type='table'")
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(("".to_owned(),));
-        println!("{}", row.0);
+        let temp =
+            std::env::temp_dir().join(format!("kemuri-backup-{}.sqlite", std::process::id()));
+        sqlx::query(&format!(
+            "VACUUM INTO '{}'",
+            temp.display().to_string().replace('\'', "''")
+        ))
+        .execute(&pool)
+        .await?;
+        let image = std::fs::read(&temp)?;
+        std::fs::remove_file(&temp).ok();
+        use std::io::Write;
+        std::io::stdout().lock().write_all(&image)?;
     } else {
         sqlx::query(&format!("VACUUM INTO '{}'", output.replace('\'', "''")))
             .execute(&pool)
@@ -181,7 +187,7 @@ async fn run_database_backup(config_path: Option<&std::path::Path>, output: &str
 
 use std::str::FromStr;
 
-fn run_doctor(config_path: Option<&std::path::Path>, test_notifiers: bool) -> Result<()> {
+async fn run_doctor(config_path: Option<&std::path::Path>, test_notifiers: bool) -> Result<()> {
     let mut any_fail = false;
 
     println!("Kemuri Doctor");
@@ -235,8 +241,7 @@ fn run_doctor(config_path: Option<&std::path::Path>, test_notifiers: bool) -> Re
         }
 
         let db_path = &cfg.storage.path;
-        let rt = tokio::runtime::Runtime::new()?;
-        let db_result = rt.block_on(async {
+        let db_result = async {
             let options = sqlx::sqlite::SqliteConnectOptions::from_str(&format!(
                 "sqlite://{}?mode=ro",
                 db_path
@@ -251,7 +256,8 @@ fn run_doctor(config_path: Option<&std::path::Path>, test_notifiers: bool) -> Re
                 .await?;
             pool.close().await;
             Ok::<String, anyhow::Error>(row.0)
-        });
+        }
+        .await;
         match db_result {
             Ok(result) if result == "ok" => println!("[PASS] Database integrity check"),
             Ok(result) => {
@@ -313,45 +319,28 @@ fn run_doctor(config_path: Option<&std::path::Path>, test_notifiers: bool) -> Re
         if test_notifiers {
             for notifier_cfg in &cfg.notifiers {
                 let notifier_id = notifier_cfg.id().to_string();
-                match notifier_cfg {
+                let notifier: Result<Box<dyn kemuri_server::Notifier>, _> = match notifier_cfg {
                     kemuri_config::NotifierConfig::Webhook(params) => {
-                        match kemuri_server::WebhookNotifier::from_config(params) {
-                            Ok(notifier) => {
-                                let payload = make_test_notification(&notifier_id);
-                                let notifier: Box<dyn kemuri_server::Notifier> = Box::new(notifier);
-                                let rt2 = tokio::runtime::Runtime::new()?;
-                                match rt2.block_on(notifier.send(payload)) {
-                                    Ok(()) => {
-                                        println!("[PASS] Notifier connectivity: {}", notifier_id)
-                                    }
-                                    Err(e) => {
-                                        println!(
-                                            "[FAIL] Notifier connectivity: {}: {}",
-                                            notifier_id, e
-                                        );
-                                        any_fail = true;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                println!("[FAIL] Notifier configuration: {}: {}", notifier_id, e);
-                                any_fail = true;
-                            }
-                        }
+                        kemuri_server::WebhookNotifier::from_config(params)
+                            .map(|value| Box::new(value) as Box<dyn kemuri_server::Notifier>)
                     }
                     kemuri_config::NotifierConfig::Smtp(params) => {
-                        match kemuri_server::SmtpNotifier::from_config(params) {
-                            Ok(_notifier) => {
-                                println!(
-                                    "[PASS] Notifier configuration: {} (SMTP - connectivity not tested without sending)",
-                                    notifier_id
-                                );
-                            }
-                            Err(e) => {
-                                println!("[FAIL] Notifier configuration: {}: {}", notifier_id, e);
-                                any_fail = true;
-                            }
+                        kemuri_server::SmtpNotifier::from_config(params)
+                            .map(|value| Box::new(value) as Box<dyn kemuri_server::Notifier>)
+                    }
+                };
+                match notifier {
+                    Ok(notifier) => match notifier.send(make_test_notification(&notifier_id)).await
+                    {
+                        Ok(()) => println!("[PASS] Notifier connectivity: {}", notifier_id),
+                        Err(e) => {
+                            println!("[FAIL] Notifier connectivity: {}: {}", notifier_id, e);
+                            any_fail = true;
                         }
+                    },
+                    Err(e) => {
+                        println!("[FAIL] Notifier configuration: {}: {}", notifier_id, e);
+                        any_fail = true;
                     }
                 }
             }
@@ -505,26 +494,7 @@ async fn run_check(config_path: &std::path::Path, target_check: &str) -> Result<
         _ => 1,
     };
 
-    let params = match &check_def.probe_params {
-        kemuri_config::ResolvedProbeParams::Tcp(p) => {
-            let mut m = std::collections::HashMap::new();
-            m.insert("host".to_owned(), p.host.clone());
-            m.insert("port".to_owned(), p.port.to_string());
-            m
-        }
-        kemuri_config::ResolvedProbeParams::Dns(p) => {
-            let mut m = std::collections::HashMap::new();
-            m.insert("name".to_owned(), p.domain.clone());
-            if let Some(ref rt) = p.record_type {
-                m.insert("record_type".to_owned(), rt.clone());
-            }
-            if let Some(ref srv) = p.resolver {
-                m.insert("server".to_owned(), srv.clone());
-            }
-            m
-        }
-        _ => std::collections::HashMap::new(),
-    };
+    let params = kemuri_server::worker_probe_params(&check_def.probe_params);
 
     let resolved_check = kemuri_probes::ResolvedCheck {
         check_id: check_def.check_id.clone(),
@@ -581,6 +551,14 @@ async fn run_check(config_path: &std::path::Path, target_check: &str) -> Result<
                 println!("           {}: {}", k, v);
             }
         }
+    }
+
+    if result
+        .results
+        .iter()
+        .any(|sample| sample.outcome != kemuri_core::SampleOutcome::Success)
+    {
+        anyhow::bail!("check is unhealthy");
     }
 
     Ok(())

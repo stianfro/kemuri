@@ -21,6 +21,7 @@ pub struct RoundJob {
 pub struct WorkerPool {
     registry: Arc<ProbeRegistry>,
     num_workers: usize,
+    fatal_tx: Option<mpsc::Sender<&'static str>>,
 }
 
 impl WorkerPool {
@@ -28,7 +29,13 @@ impl WorkerPool {
         Self {
             registry,
             num_workers,
+            fatal_tx: None,
         }
+    }
+
+    pub fn with_fatal_channel(mut self, sender: mpsc::Sender<&'static str>) -> Self {
+        self.fatal_tx = Some(sender);
+        self
     }
 
     pub fn start(
@@ -45,6 +52,7 @@ impl WorkerPool {
             let result_tx = result_tx.clone();
             let registry = self.registry.clone();
             let running_rounds = running_rounds.clone();
+            let fatal_tx = self.fatal_tx.clone();
 
             let handle = tokio::spawn(async move {
                 loop {
@@ -57,16 +65,11 @@ impl WorkerPool {
                         Some(j) => j,
                         None => {
                             tracing::debug!(worker_id, "worker shutting down: channel closed");
-                            return;
+                            break;
                         }
                     };
 
                     let key = (job.target_id.clone(), job.check_id.clone());
-                    {
-                        let mut running = running_rounds.lock().await;
-                        running.insert(key.clone());
-                    }
-
                     let result = execute_round(&registry, &job).await;
 
                     {
@@ -76,8 +79,11 @@ impl WorkerPool {
 
                     if result_tx.send(result).await.is_err() {
                         tracing::debug!(worker_id, "worker shutting down: result channel closed");
-                        return;
+                        break;
                     }
+                }
+                if let Some(sender) = fatal_tx {
+                    let _ = sender.try_send("probe_worker");
                 }
             });
 
@@ -124,26 +130,7 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
         _ => 1,
     };
 
-    let params = match &job.check.probe_params {
-        ResolvedProbeParams::Tcp(p) => {
-            let mut m = HashMap::new();
-            m.insert("host".to_owned(), p.host.clone());
-            m.insert("port".to_owned(), p.port.to_string());
-            m
-        }
-        ResolvedProbeParams::Dns(p) => {
-            let mut m = HashMap::new();
-            m.insert("name".to_owned(), p.domain.clone());
-            if let Some(ref rt) = p.record_type {
-                m.insert("record_type".to_owned(), rt.clone());
-            }
-            if let Some(ref srv) = p.resolver {
-                m.insert("server".to_owned(), srv.clone());
-            }
-            m
-        }
-        _ => HashMap::new(),
-    };
+    let params = probe_params(&job.check.probe_params);
 
     let resolved_check = ResolvedCheck {
         check_id: job.check.check_id.clone(),
@@ -180,16 +167,11 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
                 stop_reason: Some(e.to_string()),
                 sample_results: vec![SampleResult {
                     outcome: SampleOutcome::InternalError,
-                    latency: Some(
-                        finished_at
-                            .signed_duration_since(started_at)
-                            .to_std()
-                            .unwrap_or(Duration::ZERO),
-                    ),
+                    latency: None,
                     detail: None,
                     metadata: None,
                 }],
-                configured_samples: 1,
+                configured_samples: sample_count,
             };
         }
         Err(_) => {
@@ -208,11 +190,11 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
                 stop_reason: Some("timeout".to_owned()),
                 sample_results: vec![SampleResult {
                     outcome: SampleOutcome::Timeout,
-                    latency: Some(job.check.timeout),
+                    latency: None,
                     detail: None,
                     metadata: None,
                 }],
-                configured_samples: 1,
+                configured_samples: sample_count,
             };
         }
     };
@@ -234,7 +216,7 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
         execution_status,
         stop_reason: None,
         sample_results: round_result.results,
-        configured_samples: 1,
+        configured_samples: sample_count,
     }
 }
 
@@ -253,4 +235,85 @@ fn classify_execution_status(results: &[SampleResult]) -> kemuri_core::RoundExec
     } else {
         kemuri_core::RoundExecutionStatus::Complete
     }
+}
+
+pub fn probe_params(params: &ResolvedProbeParams) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    match params {
+        ResolvedProbeParams::Icmp(params) => {
+            values.insert("address_family".to_owned(), params.address_family.clone());
+            values.insert("payload_size".to_owned(), params.payload_size.to_string());
+            if let Some(source_address) = &params.source_address {
+                values.insert("source_address".to_owned(), source_address.clone());
+            }
+        }
+        ResolvedProbeParams::Http(params) => {
+            values.insert("url".to_owned(), params.url.clone());
+            if let Some(method) = &params.method {
+                values.insert("method".to_owned(), method.clone());
+            }
+            if let Some(status) = params.expected_status {
+                values.insert("expected_status".to_owned(), status.to_string());
+            }
+            if let Some((start, end)) = params.expected_status_range {
+                values.insert("expected_status_range".to_owned(), format!("{start}-{end}"));
+            }
+            if let Some(body) = &params.body {
+                values.insert("body".to_owned(), body.clone());
+            }
+            values.insert(
+                "follow_redirects".to_owned(),
+                params.follow_redirects.to_string(),
+            );
+            values.insert(
+                "max_redirect_count".to_owned(),
+                params.max_redirect_count.to_string(),
+            );
+            values.insert("connection_mode".to_owned(), params.connection_mode.clone());
+            values.insert("measure_until".to_owned(), params.measure_until.clone());
+            values.insert("tls_validate".to_owned(), params.tls_validate.to_string());
+            if let Some(user_agent) = &params.user_agent {
+                values.insert("user_agent".to_owned(), user_agent.clone());
+            }
+            if !params.root_certificates.is_empty()
+                && let Ok(certificates) = serde_json::to_string(&params.root_certificates)
+            {
+                values.insert("root_certificates".to_owned(), certificates);
+            }
+            if !params.headers.is_empty()
+                && let Ok(headers) = serde_json::to_string(&params.headers)
+            {
+                values.insert("headers".to_owned(), headers);
+            }
+        }
+        ResolvedProbeParams::Tcp(params) => {
+            values.insert("host".to_owned(), params.host.clone());
+            values.insert("port".to_owned(), params.port.to_string());
+            values.insert("address_family".to_owned(), params.address_family.clone());
+            if let Some(source_address) = &params.source_address {
+                values.insert("source_address".to_owned(), source_address.clone());
+            }
+            if let Some(tls) = &params.tls
+                && let Ok(tls) = serde_json::to_string(tls)
+            {
+                values.insert("tls".to_owned(), tls);
+            }
+        }
+        ResolvedProbeParams::Dns(params) => {
+            values.insert("name".to_owned(), params.domain.clone());
+            if let Some(record_type) = &params.record_type {
+                values.insert("record_type".to_owned(), record_type.clone());
+            }
+            if let Some(server) = &params.resolver {
+                values.insert("server".to_owned(), server.clone());
+            }
+            values.insert("protocol".to_owned(), params.protocol.clone());
+            values.insert("expected_rcode".to_owned(), params.expected_rcode.clone());
+            values.insert(
+                "require_answer".to_owned(),
+                params.require_answer.to_string(),
+            );
+        }
+    }
+    values
 }

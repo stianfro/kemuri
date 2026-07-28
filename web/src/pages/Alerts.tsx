@@ -1,11 +1,12 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from '../router';
 import {
   fetchAlerts,
   fetchAlertEvents,
   type AlertState,
   type AlertEvent,
 } from '../api';
+import { formatTime } from '../time';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -33,15 +34,6 @@ function stateBadge(state: string) {
       {state}
     </span>
   );
-}
-
-function formatTime(iso: string | null): string {
-  if (!iso) return '-';
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
 }
 
 function formatDuration(iso: string | null): string {

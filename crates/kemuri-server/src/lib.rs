@@ -12,16 +12,20 @@ mod worker;
 mod writer;
 
 use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use futures::stream::Stream;
 use kemuri_config::KemuriConfig;
 use kemuri_core::BuildInfo;
@@ -33,6 +37,7 @@ use kemuri_probes::{
 use kemuri_storage::StorageManager;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
+use rust_embed::RustEmbed;
 use tokio::sync::mpsc;
 
 pub use alerts::AlertEvaluator;
@@ -47,6 +52,7 @@ pub use notifiers::{NotificationPayload, Notifier, SmtpNotifier, WebhookNotifier
 pub use probe_registry::ProbeRegistry;
 pub use scheduler::Scheduler;
 pub use supervisor::Supervisor;
+pub use worker::probe_params as worker_probe_params;
 pub use worker::{RoundJob, WorkerPool};
 pub use writer::{RoundResult, StorageWriter};
 
@@ -61,6 +67,8 @@ pub struct AppState {
     pub event_tx: tokio::sync::broadcast::Sender<SystemEvent>,
     pub config_path: Arc<PathBuf>,
     pub last_reload: Arc<std::sync::RwLock<Option<ReloadStatus>>>,
+    pub reload_tx: mpsc::Sender<()>,
+    pub disk_ready: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,52 +121,32 @@ pub async fn serve(
         std::time::Duration::from_millis(10),
     )));
 
-    if resolved
-        .checks
-        .iter()
-        .any(|c| c.probe_kind == kemuri_core::ProbeKind::Http)
-    {
-        let http_config = HttpProbeConfig::default();
-        if let Ok(http_probe) = HttpProbe::new(http_config) {
-            registry.register(Arc::new(http_probe));
-        }
+    let http_config = HttpProbeConfig::default();
+    if let Ok(http_probe) = HttpProbe::new(http_config) {
+        registry.register(Arc::new(http_probe));
     }
 
-    if resolved
+    let icmp_cap = check_icmp_capability();
+    if icmp_cap.is_available() {
+        let icmp_config = IcmpProbeConfig::default();
+        registry.register(Arc::new(IcmpProbe::new(icmp_config)));
+    } else if resolved
         .checks
         .iter()
         .any(|c| c.probe_kind == kemuri_core::ProbeKind::Icmp)
     {
-        let icmp_cap = check_icmp_capability();
-        if icmp_cap.is_available() {
-            let icmp_config = IcmpProbeConfig::default();
-            registry.register(Arc::new(IcmpProbe::new(icmp_config)));
-        } else {
-            tracing::warn!(
-                "ICMP checks configured but ICMP capability not available. \
+        tracing::warn!(
+            "ICMP checks configured but ICMP capability not available. \
                  Ensure the process has permission to create ICMP sockets \
                  (e.g., add to the ping group or set CAP_NET_RAW)"
-            );
-        }
+        );
     }
 
-    if resolved
-        .checks
-        .iter()
-        .any(|c| c.probe_kind == kemuri_core::ProbeKind::Tcp)
-    {
-        let tcp_config = TcpProbeConfig::default();
-        registry.register(Arc::new(TcpProbe::new(tcp_config)));
-    }
+    let tcp_config = TcpProbeConfig::default();
+    registry.register(Arc::new(TcpProbe::new(tcp_config)));
 
-    if resolved
-        .checks
-        .iter()
-        .any(|c| c.probe_kind == kemuri_core::ProbeKind::Dns)
-    {
-        let dns_config = DnsProbeConfig::default();
-        registry.register(Arc::new(DnsProbe::new(dns_config)));
-    }
+    let dns_config = DnsProbeConfig::default();
+    registry.register(Arc::new(DnsProbe::new(dns_config)));
 
     let registry = Arc::new(registry);
 
@@ -166,6 +154,7 @@ pub async fn serve(
     let (result_tx, result_rx) = mpsc::channel::<writer::RoundResult>(256);
     let (alert_tx, alert_rx) = mpsc::channel::<alerts::AlertNotification>(256);
     let (event_tx, _) = tokio::sync::broadcast::channel::<SystemEvent>(256);
+    let (fatal_tx, mut fatal_rx) = mpsc::channel::<&'static str>(16);
 
     let clock = Arc::new(kemuri_core::RealClock);
 
@@ -175,20 +164,25 @@ pub async fn serve(
         config.scheduler.clone(),
         resolved.checks.clone(),
         job_tx,
+        result_tx.clone(),
         clock.clone(),
-    );
+    )
+    .with_fatal_channel(fatal_tx.clone());
 
     let running_rounds = scheduler_inst.running_rounds();
 
-    let worker_pool = WorkerPool::new(registry.clone(), 4);
-    let _worker_handles = worker_pool.start(job_rx, result_tx, running_rounds);
+    let worker_pool = WorkerPool::new(registry.clone(), config.scheduler.max_concurrent as usize)
+        .with_fatal_channel(fatal_tx.clone());
+    let mut worker_handles = worker_pool.start(job_rx, result_tx, running_rounds);
 
     let writer_storage = Arc::new(storage);
     let writer = StorageWriter::new(writer_storage.clone(), observer_internal_id)
         .with_alert_channel(alert_tx)
         .with_event_channel(event_tx.clone());
-    let writer_handle = tokio::spawn(async move {
+    let fatal_writer = fatal_tx.clone();
+    let mut writer_handle = tokio::spawn(async move {
         writer.run(result_rx).await;
+        let _ = fatal_writer.send("storage_writer").await;
     });
 
     let alert_evaluator = AlertEvaluator::new(
@@ -198,27 +192,14 @@ pub async fn serve(
         observer_internal_id,
     )
     .with_event_channel(event_tx.clone());
+    let fatal_alert = fatal_tx.clone();
     let _alert_handle = tokio::spawn(async move {
         alert_evaluator.run(alert_rx).await;
+        let _ = fatal_alert.send("alert_evaluator").await;
     });
 
-    let mut notifier_map: HashMap<NotifierId, Arc<dyn Notifier>> = HashMap::new();
-    for notifier_cfg in &config.notifiers {
-        match notifier_cfg {
-            kemuri_config::NotifierConfig::Webhook(params) => {
-                if let Ok(notifier) = WebhookNotifier::from_config(params) {
-                    let id = params.id.clone();
-                    notifier_map.insert(id, Arc::new(notifier));
-                }
-            }
-            kemuri_config::NotifierConfig::Smtp(params) => {
-                if let Ok(notifier) = SmtpNotifier::from_config(params) {
-                    let id = params.id.clone();
-                    notifier_map.insert(id, Arc::new(notifier));
-                }
-            }
-        }
-    }
+    let notifier_map =
+        build_notifiers(&config).map_err(|error| ServerError::Storage(error.to_string()))?;
     let shared_notifiers = Arc::new(std::sync::RwLock::new(notifier_map));
 
     let (worker_shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -230,8 +211,10 @@ pub async fn serve(
         config.server.public_url.clone(),
     );
     let notification_shutdown = worker_shutdown_tx.subscribe();
+    let fatal_notification = fatal_tx.clone();
     let _notification_handle = tokio::spawn(async move {
         notification_worker.run(notification_shutdown).await;
+        let _ = fatal_notification.send("notification_worker").await;
     });
 
     let no_data_evaluator = AlertEvaluator::new(
@@ -242,6 +225,7 @@ pub async fn serve(
     )
     .with_event_channel(event_tx.clone());
     let mut no_data_shutdown = worker_shutdown_tx.subscribe();
+    let fatal_no_data = fatal_tx.clone();
     let _no_data_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -250,6 +234,7 @@ pub async fn serve(
                     no_data_evaluator.run_no_data_check().await;
                 }
                 _ = no_data_shutdown.recv() => {
+                    let _ = fatal_no_data.send("no_data_evaluator").await;
                     return;
                 }
             }
@@ -259,8 +244,10 @@ pub async fn serve(
     let rollup_pool = pool.clone();
     let rollup_shutdown = worker_shutdown_tx.subscribe();
     let rollup_worker = rollup_worker::RollupWorker::new(Arc::new(rollup_pool));
+    let fatal_rollup = fatal_tx.clone();
     let _rollup_handle = tokio::spawn(async move {
         rollup_worker.run(rollup_shutdown).await;
+        let _ = fatal_rollup.send("rollup_worker").await;
     });
 
     let retention_pool = pool.clone();
@@ -268,11 +255,76 @@ pub async fn serve(
     let retention_config = config.storage.retention.clone();
     let retention_worker =
         retention_worker::RetentionWorker::new(Arc::new(retention_pool), retention_config);
+    let fatal_retention = fatal_tx.clone();
     let _retention_handle = tokio::spawn(async move {
         retention_worker.run(retention_shutdown).await;
+        let _ = fatal_retention.send("retention_worker").await;
     });
 
     scheduler_inst.start();
+    let disk_ready = Arc::new(AtomicBool::new(true));
+    let mut disk_shutdown = worker_shutdown_tx.subscribe();
+    let disk_config = shared_config.clone();
+    let disk_scheduler = scheduler_inst.command_sender();
+    let disk_ready_worker = disk_ready.clone();
+    let _disk_handle = tokio::spawn(async move {
+        let mut paused = false;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let config = disk_config.read().unwrap().clone();
+                    let database = std::path::Path::new(&config.storage.path);
+                    let directory = database.parent().unwrap_or_else(|| std::path::Path::new("."));
+                    if let (Ok(available), Ok(total)) =
+                        (fs2::available_space(directory), fs2::total_space(directory))
+                    {
+                        let free_ratio = if total == 0 {
+                            0.0
+                        } else {
+                            available as f64 / total as f64
+                        };
+                        metrics::gauge!("kemuri_disk_free_bytes").set(available as f64);
+                        metrics::gauge!("kemuri_disk_free_ratio").set(free_ratio);
+                        let critical = percentage_ratio(
+                            &config.storage.disk_pressure.critical_free,
+                            0.05,
+                        );
+                        let warning = percentage_ratio(
+                            &config.storage.disk_pressure.warning_free,
+                            0.10,
+                        );
+                        let should_pause = if paused {
+                            free_ratio <= warning
+                        } else {
+                            free_ratio <= critical
+                        };
+                        if should_pause != paused {
+                            paused = should_pause;
+                            disk_ready_worker.store(!paused, Ordering::Release);
+                            if let Some(sender) = &disk_scheduler {
+                                let _ = sender.send(scheduler::SchedulerCommand::Pause(paused)).await;
+                            }
+                            if paused {
+                                tracing::error!(
+                                    free_ratio,
+                                    "scheduling paused because disk free space is critical"
+                                );
+                            } else {
+                                tracing::info!(
+                                    free_ratio,
+                                    "scheduling resumed after disk free space recovered"
+                                );
+                            }
+                        }
+                    } else {
+                        disk_ready_worker.store(false, Ordering::Release);
+                    }
+                }
+                _ = disk_shutdown.recv() => return,
+            }
+        }
+    });
 
     metrics::counter!("kemuri_build_info",
         "version" => build_info.version.clone(),
@@ -281,6 +333,7 @@ pub async fn serve(
     metrics::gauge!("kemuri_process_start_time_seconds").set(chrono::Utc::now().timestamp() as f64);
 
     let last_reload = Arc::new(std::sync::RwLock::new(None::<ReloadStatus>));
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let state = AppState {
         build_info: Arc::new(build_info),
@@ -292,6 +345,8 @@ pub async fn serve(
         event_tx: event_tx.clone(),
         config_path: Arc::new(config_path),
         last_reload: last_reload.clone(),
+        reload_tx: reload_tx.clone(),
+        disk_ready,
     };
 
     let config_path_arc = state.config_path.clone();
@@ -308,8 +363,6 @@ pub async fn serve(
         .map_err(|e| ServerError::Bind(e.to_string()))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
-
     let mut sigterm_rx = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| ServerError::Serve(e.to_string()))?;
     let mut sighup_rx = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -338,16 +391,24 @@ pub async fn serve(
         .unwrap_or(std::time::Duration::from_secs(30));
 
     let mut shutdown_rx1 = shutdown_rx.resubscribe();
-    let server = axum::serve(listener, app);
-
-    let result = tokio::select! {
-        result = server.with_graceful_shutdown(async move {
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
             let _ = shutdown_rx1.recv().await;
             tracing::info!("shutdown signal received, draining connections");
-        }) => {
-            result
-        }
-        _ = reload_rx.recv() => {
+        })
+        .into_future();
+    tokio::pin!(server);
+
+    let result = loop {
+        tokio::select! {
+            result = &mut server => break result,
+            Some(component) = fatal_rx.recv() => {
+                tracing::error!(component, "required runtime task exited unexpectedly");
+                break Err(std::io::Error::other(format!(
+                    "required runtime task exited: {component}"
+                )));
+            }
+            Some(()) = reload_rx.recv() => {
             perform_reload(
                 &shared_config,
                 &shared_notifiers,
@@ -359,32 +420,40 @@ pub async fn serve(
                 observer_internal_id,
                 &config_path_arc,
             ).await;
-            Ok(())
+            }
         }
     };
 
-    match result {
-        Ok(()) => {}
-        Err(e) => return Err(ServerError::Serve(e.to_string())),
-    }
+    let serve_error = result.err().map(|error| error.to_string());
 
     tracing::info!("stopping scheduler and workers");
-    scheduler_inst.stop();
+    scheduler_inst.stop().await;
 
     let _ = worker_shutdown_tx.send(());
 
-    let deadline = tokio::time::sleep(shutdown_timeout);
-    tokio::pin!(deadline);
-
-    tokio::select! {
-        _ = writer_handle => {}
-        _ = &mut deadline => {
-            tracing::warn!("graceful shutdown deadline exceeded");
+    let graceful = async {
+        for worker in &mut worker_handles {
+            let _ = worker.await;
         }
+        let _ = (&mut writer_handle).await;
+    };
+    if tokio::time::timeout(shutdown_timeout, graceful)
+        .await
+        .is_err()
+    {
+        tracing::warn!("graceful shutdown deadline exceeded");
+        for worker in &worker_handles {
+            worker.abort();
+        }
+        writer_handle.abort();
     }
 
     tracing::info!("kemuri server stopped");
-    Ok(())
+    if let Some(error) = serve_error {
+        Err(ServerError::Serve(error))
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -434,6 +503,20 @@ async fn perform_reload(
     };
 
     let new_generation = new_resolved.generation.to_string();
+    let notifier_map = match build_notifiers(&new_config) {
+        Ok(notifiers) => notifiers,
+        Err(error) => {
+            tracing::error!(%error, "config reload failed: notifier initialization error");
+            metrics::counter!("kemuri_config_reload_total", "result" => "failure").increment(1);
+            *last_reload.write().unwrap() = Some(ReloadStatus {
+                generation: new_generation,
+                result: "failure".to_owned(),
+                error: Some("notifier initialization failed".to_owned()),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+            return;
+        }
+    };
 
     if let Err(e) = kemuri_storage::reconcile(pool, &new_config).await {
         tracing::error!(error = %e, "config reload failed: database reconciliation error");
@@ -447,27 +530,14 @@ async fn perform_reload(
         *last_reload.write().unwrap() = Some(status);
         return;
     }
+    if let Err(error) = resolve_removed_alerts(pool, &new_config).await {
+        tracing::error!(%error, "config reload failed: alert reconciliation error");
+        return;
+    }
 
     scheduler.reconcile(new_resolved.checks.clone()).await;
 
     {
-        let mut notifier_map: HashMap<NotifierId, Arc<dyn Notifier>> = HashMap::new();
-        for notifier_cfg in &new_config.notifiers {
-            match notifier_cfg {
-                kemuri_config::NotifierConfig::Webhook(params) => {
-                    if let Ok(notifier) = WebhookNotifier::from_config(params) {
-                        let id = params.id.clone();
-                        notifier_map.insert(id, Arc::new(notifier));
-                    }
-                }
-                kemuri_config::NotifierConfig::Smtp(params) => {
-                    if let Ok(notifier) = SmtpNotifier::from_config(params) {
-                        let id = params.id.clone();
-                        notifier_map.insert(id, Arc::new(notifier));
-                    }
-                }
-            }
-        }
         *shared_notifiers.write().unwrap() = notifier_map;
     }
 
@@ -496,6 +566,87 @@ async fn perform_reload(
     *last_reload.write().unwrap() = Some(status);
 
     tracing::info!("configuration reload completed successfully");
+}
+
+fn build_notifiers(
+    config: &KemuriConfig,
+) -> Result<HashMap<NotifierId, Arc<dyn Notifier>>, String> {
+    let mut notifiers: HashMap<NotifierId, Arc<dyn Notifier>> = HashMap::new();
+    for notifier in &config.notifiers {
+        match notifier {
+            kemuri_config::NotifierConfig::Webhook(params) => {
+                let value = WebhookNotifier::from_config(params)
+                    .map_err(|error| format!("notifier {}: {error}", params.id))?;
+                notifiers.insert(params.id.clone(), Arc::new(value));
+            }
+            kemuri_config::NotifierConfig::Smtp(params) => {
+                let value = SmtpNotifier::from_config(params)
+                    .map_err(|error| format!("notifier {}: {error}", params.id))?;
+                notifiers.insert(params.id.clone(), Arc::new(value));
+            }
+        }
+    }
+    Ok(notifiers)
+}
+
+async fn resolve_removed_alerts(
+    pool: &sqlx::SqlitePool,
+    config: &KemuriConfig,
+) -> Result<(), sqlx::Error> {
+    let configured_rules: std::collections::HashSet<&str> =
+        config.rules.iter().map(|rule| rule.id.as_str()).collect();
+    let rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
+        "SELECT a.internal_id, a.rule_id, a.check_internal_id,
+                a.observer_internal_id, a.state
+         FROM alert_states a
+         LEFT JOIN checks c ON c.internal_id = a.check_internal_id
+         WHERE a.state IN ('firing', 'pending_fire', 'pending_clear')
+           AND (c.active = 0 OR c.internal_id IS NULL)",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut candidates = rows;
+    let rule_rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
+        "SELECT internal_id, rule_id, check_internal_id, observer_internal_id, state
+         FROM alert_states
+         WHERE state IN ('firing', 'pending_fire', 'pending_clear')",
+    )
+    .fetch_all(pool)
+    .await?;
+    for row in rule_rows {
+        if !configured_rules.contains(row.1.as_str())
+            && !candidates.iter().any(|candidate| candidate.0 == row.0)
+        {
+            candidates.push(row);
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for (internal_id, rule_id, check_id, observer_id, state) in candidates {
+        sqlx::query(
+            "INSERT INTO alert_events
+             (rule_id, check_internal_id, observer_internal_id, event_type,
+              from_state, to_state, occurred_at, reason)
+             VALUES (?, ?, ?, 'resolved', ?, 'normal', ?, 'config_removed')",
+        )
+        .bind(&rule_id)
+        .bind(check_id)
+        .bind(observer_id)
+        .bind(&state)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE alert_states SET state = 'normal', state_entered_at = ?,
+             first_condition_true_at = NULL, last_evaluated_at = ?
+             WHERE internal_id = ?",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(internal_id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn ensure_observer(pool: &sqlx::SqlitePool) -> Result<i64, ServerError> {
@@ -529,6 +680,7 @@ fn create_router(state: AppState) -> Router {
         .route("/system/status", get(system_status))
         .route("/events", get(events_handler))
         .route("/groups", get(api::list_groups))
+        .route("/groups/{*group_path}", get(api::get_group))
         .route("/targets", get(api::list_targets))
         .route("/targets/{target_id}", get(api::get_target))
         .route("/targets/{target_id}/checks", get(api::list_checks))
@@ -547,22 +699,53 @@ fn create_router(state: AppState) -> Router {
         .route("/alerts", get(api::list_alerts))
         .route("/alerts/{alert_id}", get(api::get_alert))
         .route("/alert-events", get(api::list_alert_events));
+    let api_routes = api_routes
+        .route("/config/reload", post(reload_config))
+        .fallback(api_not_found);
 
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
         .nest("/api/v1", api_routes)
-        .fallback(ui_fallback)
-        .with_state(state)
+        .route("/api/openapi.json", get(openapi))
+        .fallback(ui_fallback);
+    if state.config.read().unwrap().server.cors {
+        use axum::http::Method;
+        use tower_http::cors::{Any, CorsLayer};
+        router = router.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD])
+                .allow_headers(Any),
+        );
+    }
+    router.with_state(state)
 }
 
 async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz() -> &'static str {
-    "ok"
+async fn readyz(State(state): State<AppState>) -> Response {
+    if !state.disk_ready.load(Ordering::Acquire) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "disk pressure").into_response();
+    }
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(1) => (StatusCode::OK, "ok").into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response(),
+    }
+}
+
+fn percentage_ratio(value: &str, fallback: f64) -> f64 {
+    value
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .map(|value| value / 100.0)
+        .unwrap_or(fallback)
 }
 
 async fn metrics_handler(State(state): State<AppState>) -> String {
@@ -580,6 +763,11 @@ async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value>
         Ok(m) => m.len() as i64,
         Err(_) => 0,
     };
+    let data_directory = std::path::Path::new(&config.storage.path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let disk_free_bytes = fs2::available_space(data_directory).ok();
+    let disk_total_bytes = fs2::total_space(data_directory).ok();
     let last_reload = state.last_reload.read().unwrap().clone();
 
     let pending_outbox: (i64,) =
@@ -613,6 +801,9 @@ async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value>
         "uptime_seconds": uptime,
         "database_path": config.storage.path,
         "database_size_bytes": db_size,
+        "disk_free_bytes": disk_free_bytes,
+        "disk_total_bytes": disk_total_bytes,
+        "disk_ready": state.disk_ready.load(Ordering::Acquire),
         "schema_version": schema_version.0,
         "config_generation": config_generation.0,
         "notification_outbox_pending": pending_outbox.0,
@@ -643,8 +834,97 @@ async fn events_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn ui_fallback() -> impl IntoResponse {
-    Html(
-        r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Kemuri</title></head><body><div id="root"></div><script type="module" src="/assets/index.js"></script></body></html>"#,
-    )
+async fn reload_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<serde_json::Value>), api::ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !content_type.starts_with("application/json") {
+        return Err(api::bad_request_public(
+            "Content-Type must be application/json",
+        ));
+    }
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let config = state.config.read().unwrap().clone();
+        let local_origin = format!("http://{}:{}", config.server.bind, config.server.port);
+        if config.server.public_url.as_deref() != Some(origin) && origin != local_origin {
+            return Err(api::bad_request_public(
+                "cross-origin reload is not permitted",
+            ));
+        }
+    }
+    state
+        .reload_tx
+        .try_send(())
+        .map_err(|_| api::bad_request_public("a configuration reload is already pending"))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "reload_pending"})),
+    ))
+}
+
+async fn api_not_found() -> impl IntoResponse {
+    api::not_found_public("route_not_found", "The requested API route does not exist")
+}
+
+async fn openapi() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Kemuri API", "version": env!("CARGO_PKG_VERSION")},
+        "paths": {
+            "/api/v1/info": {"get": {"responses": {"200": {"description": "Build information"}}}},
+            "/api/v1/system/status": {"get": {"responses": {"200": {"description": "System status"}}}},
+            "/api/v1/events": {"get": {"responses": {"200": {"description": "Event stream"}}}},
+            "/api/v1/groups": {"get": {"responses": {"200": {"description": "Groups"}}}},
+            "/api/v1/targets": {"get": {"responses": {"200": {"description": "Targets"}}}},
+            "/api/v1/targets/{target_id}": {"get": {"responses": {"200": {"description": "Target"}}}},
+            "/api/v1/targets/{target_id}/checks": {"get": {"responses": {"200": {"description": "Checks"}}}},
+            "/api/v1/targets/{target_id}/checks/{check_id}": {"get": {"responses": {"200": {"description": "Check"}}}},
+            "/api/v1/targets/{target_id}/checks/{check_id}/series": {"get": {"responses": {"200": {"description": "Series"}}}},
+            "/api/v1/targets/{target_id}/checks/{check_id}/rounds": {"get": {"responses": {"200": {"description": "Rounds"}}}},
+            "/api/v1/alerts": {"get": {"responses": {"200": {"description": "Alerts"}}}},
+            "/api/v1/alerts/{alert_id}": {"get": {"responses": {"200": {"description": "Alert"}}}},
+            "/api/v1/alert-events": {"get": {"responses": {"200": {"description": "Alert events"}}}},
+            "/api/v1/config/reload": {"post": {"responses": {"202": {"description": "Reload queued"}}}}
+        }
+    }))
+}
+
+#[derive(RustEmbed)]
+#[folder = "../../web/dist"]
+struct WebAssets;
+
+async fn ui_fallback(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    if !path.is_empty() {
+        if let Some(asset) = WebAssets::get(path) {
+            return asset_response(path, asset.data);
+        }
+        if path
+            .rsplit('/')
+            .next()
+            .is_some_and(|part| part.contains('.'))
+        {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    }
+    match WebAssets::get("index.html") {
+        Some(asset) => asset_response("index.html", asset.data),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn asset_response(path: &str, data: std::borrow::Cow<'static, [u8]>) -> Response {
+    let content_type = mime_guess::from_path(path).first_or_octet_stream();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type.as_ref())
+        .body(Body::from(data.into_owned()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

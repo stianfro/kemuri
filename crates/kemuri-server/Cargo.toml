@@ -32,6 +32,9 @@ reqwest = { workspace = true }
 async-trait = { workspace = true }
 lettre = { workspace = true }
 rand = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+fs2 = { workspace = true }
 
 [lints]
 workspace = true

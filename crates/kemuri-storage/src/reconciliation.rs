@@ -22,12 +22,18 @@ pub async fn reconcile(
     pool: &SqlitePool,
     config: &KemuriConfig,
 ) -> Result<(), ReconciliationError> {
+    let resolved = config.resolve().ok();
+    let generation = config.generation_hash().to_string();
     let active_targets = TargetRepo::list_active(pool).await?;
     let active_target_ids: HashSet<String> =
         active_targets.iter().map(|t| t.target_id.clone()).collect();
 
-    let config_target_ids: HashSet<String> =
-        config.targets.iter().map(|t| t.id.to_string()).collect();
+    let config_target_ids: HashSet<String> = config
+        .targets
+        .iter()
+        .filter(|target| target.enabled)
+        .map(|t| t.id.to_string())
+        .collect();
 
     for removed_id in active_target_ids.difference(&config_target_ids) {
         TargetRepo::deactivate(pool, removed_id).await?;
@@ -35,6 +41,10 @@ pub async fn reconcile(
 
     for target in &config.targets {
         let target_id_str = target.id.to_string();
+        if !target.enabled {
+            TargetRepo::deactivate(pool, &target_id_str).await?;
+            continue;
+        }
         let name = target.name.as_deref().unwrap_or(&target_id_str);
         let group_path = target.group_path.as_deref().unwrap_or("");
         let labels = target
@@ -50,8 +60,12 @@ pub async fn reconcile(
         let active_check_ids: HashSet<String> =
             active_checks.iter().map(|c| c.check_id.clone()).collect();
 
-        let config_check_ids: HashSet<String> =
-            target.checks.iter().map(|c| c.id.to_string()).collect();
+        let config_check_ids: HashSet<String> = target
+            .checks
+            .iter()
+            .filter(|check| check.enabled)
+            .map(|c| c.id.to_string())
+            .collect();
 
         for existing_check in &active_checks {
             if let Some(config_check) = target
@@ -82,11 +96,15 @@ pub async fn reconcile(
 
         for check in &target.checks {
             let check_id_str = check.id.to_string();
+            if !check.enabled {
+                CheckRepo::deactivate(pool, target_internal_id, &check_id_str).await?;
+                continue;
+            }
             let profile = config.profiles.iter().find(|p| p.id() == &check.profile);
             let probe_type = profile.map(|p| p.kind().to_string()).unwrap_or_default();
             let revision_id: Option<&str> = None;
 
-            CheckRepo::upsert(
+            let check_internal_id = CheckRepo::upsert(
                 pool,
                 target_internal_id,
                 &check_id_str,
@@ -94,6 +112,39 @@ pub async fn reconcile(
                 revision_id,
             )
             .await?;
+            if let Some(resolved_check) = resolved
+                .as_ref()
+                .into_iter()
+                .flat_map(|resolved| &resolved.checks)
+                .find(|item| item.target_id == target.id && item.check_id == check.id)
+            {
+                let redacted = serde_json::json!({
+                    "probe_kind": resolved_check.probe_kind.to_string(),
+                    "interval_ms": resolved_check.interval.as_millis(),
+                    "timeout_ms": resolved_check.timeout.as_millis()
+                })
+                .to_string();
+                sqlx::query(
+                    "UPDATE checks SET profile_id = ?, config_generation = ?, \
+                     current_revision_id = ?, redacted_resolved_config = ? WHERE internal_id = ?",
+                )
+                .bind(check.profile.as_str())
+                .bind(&generation)
+                .bind(resolved_check.revision_id.as_str())
+                .bind(&redacted)
+                .bind(check_internal_id)
+                .execute(pool)
+                .await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO check_revisions \
+                     (check_internal_id, revision_id, redacted_config) VALUES (?, ?, ?)",
+                )
+                .bind(check_internal_id)
+                .bind(resolved_check.revision_id.as_str())
+                .bind(redacted)
+                .execute(pool)
+                .await?;
+            }
         }
     }
 

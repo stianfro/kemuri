@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "kemuri"
+path = "src/main.rs"
+
 [dependencies]
 kemuri-core = { workspace = true }
 kemuri-config = { workspace = true }

@@ -23,11 +23,39 @@ run *args:
     cargo run -- {{args}}
 
 web-build:
-    cd web && npm install && npm run build
+    cd web && npm ci && npm run build
+    git diff --exit-code -- web/dist
 
 web-dev:
     cd web && npm run dev
 
-ci: fmt lint test
+test-api:
+    cargo test -p kemuri-server
+
+test-web:
+    cd web && npm ci && npm run build
+
+test-usage:
+    bash packaging/tests/usage.sh
+
+test-container:
+    docker build -f packaging/container/Dockerfile -t kemuri:test .
+
+test-load:
+    cargo test -p kemuri-server scheduler
+
+bench:
+    cargo bench --workspace --no-run
+
+yaml:
+    find .github packaging -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 -r -n1 yq eval '.' >/dev/null
+
+audit:
+    cargo deny check
+    cd web && npm audit --omit=dev --audit-level=high
+
+ci: fmt lint test test-web yaml
+
+ci-diff: fmt lint test
 
 all: fmt lint test web-build

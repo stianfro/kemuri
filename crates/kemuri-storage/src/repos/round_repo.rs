@@ -193,7 +193,18 @@ impl RoundRepo {
         batch_size: i64,
     ) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
-            "DELETE FROM rounds WHERE scheduled_at < ? AND internal_id IN (SELECT r.internal_id FROM rounds r WHERE r.scheduled_at < ? AND EXISTS (SELECT 1 FROM rollups ru WHERE ru.check_internal_id = r.check_internal_id AND ru.observer_internal_id = r.observer_internal_id AND ru.resolution_seconds = 300 AND ru.bucket_start <= r.scheduled_at) LIMIT ?)",
+            "DELETE FROM rounds WHERE scheduled_at < ? AND internal_id IN (
+                SELECT r.internal_id FROM rounds r
+                WHERE r.scheduled_at < ? AND EXISTS (
+                    SELECT 1 FROM rollups ru
+                    WHERE ru.check_internal_id = r.check_internal_id
+                      AND ru.observer_internal_id = r.observer_internal_id
+                      AND ru.resolution_seconds = 300
+                      AND unixepoch(r.scheduled_at) >= unixepoch(ru.bucket_start)
+                      AND unixepoch(r.scheduled_at) < unixepoch(ru.bucket_start) + 300
+                )
+                LIMIT ?
+            )",
         )
         .bind(before)
         .bind(before)

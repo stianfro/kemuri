@@ -1,0 +1,25 @@
+version: 1
+server:
+  bind: 0.0.0.0
+  port: 8080
+storage:
+  path: /var/lib/kemuri/kemuri.db
+  disk_pressure:
+    warning_free: 10%
+    critical_free: 5%
+scheduler:
+  startup_mode: immediate_then_aligned
+  default_jitter: 10%
+  max_concurrent: 64
+profiles:
+  - kind: http
+    id: local-http
+    url: http://127.0.0.1:8080/healthz
+    interval: 30s
+    timeout: 5s
+targets:
+  - id: kemuri
+    address: 127.0.0.1
+    checks:
+      - id: health
+        profile: local-http

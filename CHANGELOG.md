@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0
+
+- Add typed probe settings, strict version 1 configuration validation, and stable revisions
+- Fix scheduler cadence, startup rounds, concurrency limits, reloads, and graceful shutdown
+- Add disk pressure controls, readiness checks, migration-backed runtime state, and safer retention
+- Add millisecond and microsecond API units, cursor validation, OpenAPI, group pages, and graph overlays
+- Embed the production web bundle and ship the `kemuri` binary
+- Add Linux release archives, multi-architecture container publishing, and local usage gates
+
 ## 0.1.0
 
 Initial release.

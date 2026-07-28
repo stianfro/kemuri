@@ -40,6 +40,7 @@ impl RetentionWorker {
         self.enforce_raw_retention().await?;
         self.enforce_rollup_5m_retention().await?;
         self.enforce_rollup_1h_retention().await?;
+        self.enforce_notification_retention().await?;
         self.enforce_alert_events_retention().await?;
         Ok(())
     }
@@ -139,10 +140,26 @@ impl RetentionWorker {
         let cutoff = Utc::now() - chrono::Duration::from_std(retention).unwrap_or_default();
         let cutoff_str = cutoff.to_rfc3339();
 
-        let result = sqlx::query("DELETE FROM alert_events WHERE occurred_at < ?")
-            .bind(&cutoff_str)
-            .execute(self.pool.as_ref())
-            .await?;
+        sqlx::query(
+            "DELETE FROM notification_outbox WHERE internal_id IN (
+                SELECT n.internal_id FROM notification_outbox n
+                JOIN alert_events e ON e.internal_id = n.alert_event_internal_id
+                WHERE e.occurred_at < ? ORDER BY n.internal_id LIMIT 1000
+            )",
+        )
+        .bind(&cutoff_str)
+        .execute(self.pool.as_ref())
+        .await?;
+
+        let result = sqlx::query(
+            "DELETE FROM alert_events WHERE internal_id IN (
+                SELECT internal_id FROM alert_events
+                WHERE occurred_at < ? ORDER BY internal_id LIMIT 1000
+            )",
+        )
+        .bind(&cutoff_str)
+        .execute(self.pool.as_ref())
+        .await?;
         if result.rows_affected() > 0 {
             tracing::info!(
                 deleted = result.rows_affected(),
@@ -150,6 +167,30 @@ impl RetentionWorker {
             );
         }
 
+        Ok(())
+    }
+
+    async fn enforce_notification_retention(&self) -> Result<(), sqlx::Error> {
+        let retention = match self.config.parse_notification_retention() {
+            Some(duration) => duration,
+            None => return Ok(()),
+        };
+        let cutoff = Utc::now() - chrono::Duration::from_std(retention).unwrap_or_default();
+        let result = sqlx::query(
+            "DELETE FROM notification_outbox WHERE internal_id IN (
+                SELECT internal_id FROM notification_outbox
+                WHERE created_at < ? ORDER BY internal_id LIMIT 1000
+            )",
+        )
+        .bind(cutoff.to_rfc3339())
+        .execute(self.pool.as_ref())
+        .await?;
+        if result.rows_affected() > 0 {
+            tracing::info!(
+                deleted = result.rows_affected(),
+                "retention: deleted notification records"
+            );
+        }
         Ok(())
     }
 }

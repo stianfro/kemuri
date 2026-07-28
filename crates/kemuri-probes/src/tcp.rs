@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kemuri_core::{ProbeKind, SampleOutcome};
+use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -15,6 +16,15 @@ use crate::{
 pub struct TcpProbeConfig {
     pub address_family: AddressFamily,
     pub source_address: Option<String>,
+    pub tls: Option<TcpTlsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpTlsConfig {
+    pub enabled: bool,
+    pub server_name: Option<String>,
+    pub tls_validate: Option<bool>,
+    pub root_certificates: Option<Vec<String>>,
 }
 
 pub struct TcpProbe {
@@ -90,13 +100,61 @@ impl TcpProbe {
         let addr = std::net::SocketAddr::new(resolved_ip, port);
         let start = std::time::Instant::now();
 
-        let connect_result =
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await;
+        let socket = if is_ipv6 {
+            tokio::net::TcpSocket::new_v6()
+        } else {
+            tokio::net::TcpSocket::new_v4()
+        };
+        let connect_result = match socket {
+            Ok(socket) => {
+                if let Some(source) = &self.config.source_address {
+                    let source_ip = source.parse::<IpAddr>().map_err(|error| {
+                        ProbeExecutionError::Network(format!(
+                            "invalid TCP source address {source}: {error}"
+                        ))
+                    });
+                    match source_ip {
+                        Ok(source_ip) if source_ip.is_ipv6() == is_ipv6 => {
+                            if let Err(error) = socket.bind(std::net::SocketAddr::new(source_ip, 0))
+                            {
+                                return SampleResult {
+                                    outcome: Self::classify_connect_error(&error),
+                                    latency: None,
+                                    detail: Some(error.to_string()),
+                                    metadata: None,
+                                };
+                            }
+                        }
+                        Ok(_) => {
+                            return SampleResult {
+                                outcome: SampleOutcome::InternalError,
+                                latency: None,
+                                detail: Some(
+                                    "TCP source address family does not match destination"
+                                        .to_owned(),
+                                ),
+                                metadata: None,
+                            };
+                        }
+                        Err(error) => {
+                            return SampleResult {
+                                outcome: SampleOutcome::InternalError,
+                                latency: None,
+                                detail: Some(error.to_string()),
+                                metadata: None,
+                            };
+                        }
+                    }
+                }
+                tokio::time::timeout(timeout, socket.connect(addr)).await
+            }
+            Err(error) => Ok(Err(error)),
+        };
 
         let elapsed = start.elapsed();
 
         match connect_result {
-            Ok(Ok(_stream)) => {
+            Ok(Ok(stream)) => {
                 let mut metadata = HashMap::new();
                 metadata.insert("resolved_ip".to_owned(), resolved_ip.to_string());
                 metadata.insert(
@@ -105,11 +163,31 @@ impl TcpProbe {
                 );
                 metadata.insert("port".to_owned(), port.to_string());
 
-                SampleResult {
-                    outcome: SampleOutcome::Success,
-                    latency: Some(elapsed),
-                    detail: Some(format!("connected to {}", addr)),
-                    metadata: Some(metadata),
+                if self.config.tls.as_ref().is_some_and(|tls| tls.enabled) {
+                    match self.tls_handshake(stream, host, timeout).await {
+                        Ok(()) => {
+                            metadata.insert("tls".to_owned(), "true".to_owned());
+                            SampleResult {
+                                outcome: SampleOutcome::Success,
+                                latency: Some(start.elapsed()),
+                                detail: Some(format!("TLS handshake completed with {}", addr)),
+                                metadata: Some(metadata),
+                            }
+                        }
+                        Err(error) => SampleResult {
+                            outcome: SampleOutcome::TlsError,
+                            latency: None,
+                            detail: Some(error.to_string()),
+                            metadata: Some(metadata),
+                        },
+                    }
+                } else {
+                    SampleResult {
+                        outcome: SampleOutcome::Success,
+                        latency: Some(elapsed),
+                        detail: Some(format!("connected to {}", addr)),
+                        metadata: Some(metadata),
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -124,7 +202,7 @@ impl TcpProbe {
 
                 SampleResult {
                     outcome,
-                    latency: Some(elapsed),
+                    latency: None,
                     detail: Some(e.to_string()),
                     metadata: Some(metadata),
                 }
@@ -140,12 +218,60 @@ impl TcpProbe {
 
                 SampleResult {
                     outcome: SampleOutcome::Timeout,
-                    latency: Some(elapsed),
+                    latency: None,
                     detail: Some("tcp connect timeout".to_owned()),
                     metadata: Some(metadata),
                 }
             }
         }
+    }
+
+    async fn tls_handshake(
+        &self,
+        stream: tokio::net::TcpStream,
+        host: &str,
+        timeout: Duration,
+    ) -> Result<(), ProbeExecutionError> {
+        let tls = self
+            .config
+            .tls
+            .as_ref()
+            .ok_or_else(|| ProbeExecutionError::Internal("missing TLS settings".to_owned()))?;
+        if tls.tls_validate == Some(false) {
+            return Err(ProbeExecutionError::Tls(
+                "TCP TLS certificate validation cannot be disabled".to_owned(),
+            ));
+        }
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for path in tls.root_certificates.as_deref().unwrap_or_default() {
+            let certificates = rustls::pki_types::CertificateDer::pem_file_iter(path)
+                .map_err(|error| ProbeExecutionError::Tls(format!("{path}: {error}")))?;
+            for certificate in certificates {
+                roots
+                    .add(
+                        certificate.map_err(|error| {
+                            ProbeExecutionError::Tls(format!("{path}: {error}"))
+                        })?,
+                    )
+                    .map_err(|error| ProbeExecutionError::Tls(error.to_string()))?;
+            }
+        }
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let server_name = tls.server_name.as_deref().unwrap_or(host).to_owned();
+        let server_name = rustls::pki_types::ServerName::try_from(server_name)
+            .map_err(|error| ProbeExecutionError::Tls(error.to_string()))?;
+        tokio::time::timeout(
+            timeout,
+            tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+                .connect(server_name, stream),
+        )
+        .await
+        .map_err(|_| ProbeExecutionError::Timeout(format!("{timeout:?}")))?
+        .map_err(|error| ProbeExecutionError::Tls(error.to_string()))?;
+        Ok(())
     }
 }
 
@@ -171,7 +297,24 @@ impl Probe for TcpProbe {
             .and_then(|p| p.parse().ok())
             .unwrap_or(80);
 
-        let result = self.execute_single(&host, port, check.timeout).await;
+        let effective = Self::new(TcpProbeConfig {
+            address_family: match check.params.get("address_family").map(String::as_str) {
+                Some("ipv4") => AddressFamily::Ipv4,
+                Some("ipv6") => AddressFamily::Ipv6,
+                _ => AddressFamily::Auto,
+            },
+            source_address: check
+                .params
+                .get("source_address")
+                .cloned()
+                .or_else(|| self.config.source_address.clone()),
+            tls: check
+                .params
+                .get("tls")
+                .and_then(|value| serde_json::from_str(value).ok())
+                .or_else(|| self.config.tls.clone()),
+        });
+        let result = effective.execute_single(&host, port, check.timeout).await;
 
         Ok(ProbeRound {
             check_id: check.check_id,

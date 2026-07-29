@@ -1,8 +1,10 @@
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::{HeaderName, HeaderValue};
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -13,6 +15,23 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     pub request_id: String,
+}
+
+pub struct ApiQuery<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
+            .map_err(|_| bad_request("invalid query parameters"))
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -128,7 +147,7 @@ struct JoinedAlertState {
 )]
 pub async fn list_alerts(
     State(state): State<AppState>,
-    Query(query): Query<AlertsQuery>,
+    ApiQuery(query): ApiQuery<AlertsQuery>,
 ) -> Result<Json<AlertsListResponse>, ApiError> {
     let limit = validate_limit(query.limit, 100)?;
     let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
@@ -320,7 +339,7 @@ struct JoinedAlertEvent {
 )]
 pub async fn list_alert_events(
     State(state): State<AppState>,
-    Query(query): Query<AlertEventsQuery>,
+    ApiQuery(query): ApiQuery<AlertEventsQuery>,
 ) -> Result<Json<AlertEventsResponse>, ApiError> {
     let limit = validate_limit(query.limit, 100)?;
     let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
@@ -422,7 +441,7 @@ pub struct PageQuery {
 )]
 pub async fn list_targets(
     State(state): State<AppState>,
-    Query(query): Query<PageQuery>,
+    ApiQuery(query): ApiQuery<PageQuery>,
 ) -> Result<Json<TargetsResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
@@ -632,7 +651,7 @@ pub struct CheckDetail {
 pub async fn list_checks(
     State(state): State<AppState>,
     Path(target_id): Path<String>,
-    Query(query): Query<PageQuery>,
+    ApiQuery(query): ApiQuery<PageQuery>,
 ) -> Result<Json<ChecksResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
@@ -808,7 +827,7 @@ pub struct SeriesRevisionMarker {
 pub async fn get_series(
     State(state): State<AppState>,
     Path((target_id, check_id)): Path<(String, String)>,
-    Query(query): Query<SeriesQuery>,
+    ApiQuery(query): ApiQuery<SeriesQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
@@ -863,16 +882,19 @@ pub async fn get_series(
         (3600i64, "rollup", "approximate")
     };
 
-    let points = if resolution_secs == 0 {
-        build_series_from_raw(
-            &pool,
-            check.internal_id,
-            observer_id,
-            &from_time,
-            &to_time,
-            max_points,
+    let (points, response_resolution_secs) = if resolution_secs == 0 {
+        (
+            build_series_from_raw(
+                &pool,
+                check.internal_id,
+                observer_id,
+                &from_time,
+                &to_time,
+                max_points,
+            )
+            .await?,
+            0,
         )
-        .await?
     } else {
         build_series_from_rollups(
             &pool,
@@ -917,7 +939,7 @@ pub async fn get_series(
         observer_id: "local".to_owned(),
         from_ms: from_time.timestamp_millis(),
         to_ms: to_time.timestamp_millis(),
-        resolution_ms: resolution_secs * 1000,
+        resolution_ms: response_resolution_secs * 1000,
         source: source.to_owned(),
         quantiles: quantiles.to_owned(),
         histogram_bin_representatives_us: bin_reps_us,
@@ -1124,8 +1146,11 @@ async fn build_series_from_rollups(
     from_time: &chrono::DateTime<chrono::FixedOffset>,
     to_time: &chrono::DateTime<chrono::FixedOffset>,
     max_points: u32,
-) -> Result<Vec<SeriesPoint>, ApiError> {
-    let from_str = from_time.to_rfc3339();
+) -> Result<(Vec<SeriesPoint>, i64), ApiError> {
+    let aligned_from_secs = from_time.timestamp().div_euclid(resolution_secs) * resolution_secs;
+    let aligned_from = chrono::DateTime::from_timestamp(aligned_from_secs, 0)
+        .ok_or_else(|| bad_request("invalid series range"))?;
+    let from_str = aligned_from.to_rfc3339();
     let to_str = to_time.to_rfc3339();
 
     let rollups = kemuri_storage::RollupRepo::query_by_check_and_range(
@@ -1139,22 +1164,208 @@ async fn build_series_from_rollups(
     .await
     .map_err(internal_error)?;
 
-    if rollups.len() <= max_points as usize {
-        let points: Vec<SeriesPoint> = rollups.iter().map(rollup_to_series_point).collect();
-        return Ok(points);
+    let uncovered_rounds = kemuri_storage::RoundRepo::query_without_matching_rollup(
+        pool,
+        check_internal_id,
+        observer_internal_id,
+        resolution_secs,
+        &from_str,
+        &to_str,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let mut raw_by_start: std::collections::HashMap<i64, Vec<&kemuri_storage::RoundRow>> =
+        std::collections::HashMap::new();
+    for round in &uncovered_rounds {
+        if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&round.scheduled_at) {
+            let bucket_start = timestamp.timestamp().div_euclid(resolution_secs) * resolution_secs;
+            raw_by_start.entry(bucket_start).or_default().push(round);
+        }
     }
 
-    let merge_factor = (rollups.len() / max_points as usize).max(1);
-    let mut points = Vec::new();
-    let mut i = 0;
-    while i < rollups.len() {
-        let end = (i + merge_factor).min(rollups.len());
-        let chunk = &rollups[i..end];
-        points.push(merge_rollups(chunk));
-        i = end;
+    let range_secs = (to_time.timestamp() - aligned_from_secs).max(1) as u64;
+    let base_bucket_count = range_secs.div_ceil(resolution_secs as u64);
+    let merge_factor = base_bucket_count.div_ceil(max_points as u64).max(1) as usize;
+    let effective_resolution_secs = resolution_secs * merge_factor as i64;
+    let output_bucket_count = base_bucket_count.div_ceil(merge_factor as u64);
+    let mut points_by_output_bucket: Vec<Vec<SeriesPoint>> =
+        vec![Vec::new(); output_bucket_count as usize];
+
+    for rollup in &rollups {
+        if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&rollup.bucket_start) {
+            let base_index = (timestamp.timestamp() - aligned_from_secs)
+                .div_euclid(resolution_secs)
+                .max(0) as usize;
+            let output_index = base_index / merge_factor;
+            if let Some(bucket) = points_by_output_bucket.get_mut(output_index) {
+                bucket.push(rollup_to_series_point(rollup));
+            }
+        }
+    }
+    for (bucket_start, rounds) in raw_by_start {
+        let base_index = (bucket_start - aligned_from_secs)
+            .div_euclid(resolution_secs)
+            .max(0) as usize;
+        let output_index = base_index / merge_factor;
+        if let Some(bucket) = points_by_output_bucket.get_mut(output_index) {
+            bucket.push(raw_rounds_to_series_point(bucket_start * 1_000, &rounds));
+        }
     }
 
-    Ok(points)
+    let points = points_by_output_bucket
+        .into_iter()
+        .enumerate()
+        .map(|(index, bucket)| {
+            let timestamp_ms =
+                (aligned_from_secs + index as i64 * effective_resolution_secs) * 1_000;
+            if bucket.is_empty() {
+                empty_series_point(timestamp_ms)
+            } else {
+                let mut point = merge_series_points(&bucket);
+                point.timestamp_ms = timestamp_ms;
+                point
+            }
+        })
+        .collect();
+    Ok((points, effective_resolution_secs))
+}
+
+fn raw_rounds_to_series_point(
+    timestamp_ms: i64,
+    rounds: &[&kemuri_storage::RoundRow],
+) -> SeriesPoint {
+    let attempted = rounds
+        .iter()
+        .map(|round| round.attempted_samples as i64)
+        .sum();
+    let latency_bearing = rounds
+        .iter()
+        .map(|round| round.latency_bearing_samples as i64)
+        .sum();
+    let healthy = rounds
+        .iter()
+        .map(|round| round.healthy_samples as i64)
+        .sum();
+    let unhealthy = rounds
+        .iter()
+        .map(|round| round.unhealthy_samples as i64)
+        .sum();
+    let measurement_lost = rounds
+        .iter()
+        .map(|round| round.measurement_loss_samples as i64)
+        .sum();
+    let mut histogram = kemuri_core::Histogram::new();
+    let mut latencies = Vec::new();
+    for round in rounds {
+        if let Some(blob) = &round.sample_blob
+            && let Ok(records) = kemuri_core::decode_samples(blob)
+        {
+            for record in records {
+                if let Some(latency_ns) = record.latency_ns {
+                    histogram.record(latency_ns);
+                    latencies.push(latency_ns as i64);
+                }
+            }
+        }
+    }
+    latencies.sort_unstable();
+    let total = (healthy + unhealthy + measurement_lost) as f64;
+
+    SeriesPoint {
+        timestamp_ms,
+        bucket_status: if rounds.iter().all(|round| {
+            round.execution_status.starts_with("skipped") || round.execution_status == "cancelled"
+        }) {
+            "skipped".to_owned()
+        } else {
+            "observed".to_owned()
+        },
+        rounds_count: rounds.len(),
+        attempted,
+        latency_bearing,
+        healthy,
+        unhealthy,
+        measurement_lost,
+        min_latency_us: rounds
+            .iter()
+            .filter_map(|round| round.min_latency_ns)
+            .min()
+            .map(|value| value / 1_000),
+        p50_latency_us: percentile(&latencies, 50).map(|value| value / 1_000),
+        p95_latency_us: percentile(&latencies, 95).map(|value| value / 1_000),
+        max_latency_us: rounds
+            .iter()
+            .filter_map(|round| round.max_latency_ns)
+            .max()
+            .map(|value| value / 1_000),
+        measurement_loss_ratio: if total > 0.0 {
+            measurement_lost as f64 / total
+        } else {
+            0.0
+        },
+        health_failure_ratio: if total > 0.0 {
+            unhealthy as f64 / total
+        } else {
+            0.0
+        },
+        histogram_bins: histogram.bins().to_vec(),
+    }
+}
+
+fn merge_series_points(points: &[SeriesPoint]) -> SeriesPoint {
+    if points.len() == 1 {
+        return points[0].clone();
+    }
+
+    let mut merged = empty_series_point(points[0].timestamp_ms);
+    merged.bucket_status = if points.iter().any(|point| point.bucket_status == "observed") {
+        "observed".to_owned()
+    } else if points.iter().any(|point| point.bucket_status == "skipped") {
+        "skipped".to_owned()
+    } else {
+        "missing".to_owned()
+    };
+    merged.rounds_count = points.iter().map(|point| point.rounds_count).sum();
+    merged.attempted = points.iter().map(|point| point.attempted).sum();
+    merged.latency_bearing = points.iter().map(|point| point.latency_bearing).sum();
+    merged.healthy = points.iter().map(|point| point.healthy).sum();
+    merged.unhealthy = points.iter().map(|point| point.unhealthy).sum();
+    merged.measurement_lost = points.iter().map(|point| point.measurement_lost).sum();
+    merged.min_latency_us = points.iter().filter_map(|point| point.min_latency_us).min();
+    merged.max_latency_us = points.iter().filter_map(|point| point.max_latency_us).max();
+    for point in points {
+        for (destination, source) in merged.histogram_bins.iter_mut().zip(&point.histogram_bins) {
+            *destination = destination.saturating_add(*source);
+        }
+    }
+    merged.p50_latency_us = histogram_quantile_us(&merged.histogram_bins, 0.5);
+    merged.p95_latency_us = histogram_quantile_us(&merged.histogram_bins, 0.95);
+    let total = (merged.healthy + merged.unhealthy + merged.measurement_lost) as f64;
+    if total > 0.0 {
+        merged.measurement_loss_ratio = merged.measurement_lost as f64 / total;
+        merged.health_failure_ratio = merged.unhealthy as f64 / total;
+    }
+    merged
+}
+
+fn histogram_quantile_us(bins: &[u64], percentile: f64) -> Option<i64> {
+    let count: u64 = bins.iter().sum();
+    if count == 0 {
+        return None;
+    }
+    let target = (percentile * count as f64).ceil() as u64;
+    let representatives = kemuri_core::Histogram::bin_representatives();
+    let mut accumulated = 0;
+    for (index, bin_count) in bins.iter().enumerate() {
+        accumulated += bin_count;
+        if accumulated >= target {
+            return representatives
+                .get(index)
+                .map(|value| (*value / 1_000) as i64);
+        }
+    }
+    None
 }
 
 fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
@@ -1198,84 +1409,6 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
         p50_latency_us: p50,
         p95_latency_us: p95,
         max_latency_us: r.max_latency_ns.map(|ns| ns / 1_000),
-        measurement_loss_ratio: ml_ratio,
-        health_failure_ratio: hf_ratio,
-        histogram_bins: histogram.bins().to_vec(),
-    }
-}
-
-fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
-    if chunk.len() == 1 {
-        return rollup_to_series_point(&chunk[0]);
-    }
-
-    let first = &chunk[0];
-    let mut histogram = kemuri_core::Histogram::new();
-    let mut total_attempted: i64 = 0;
-    let mut total_latency_bearing: i64 = 0;
-    let mut total_healthy: i64 = 0;
-    let mut total_unhealthy: i64 = 0;
-    let mut total_measurement_lost: i64 = 0;
-    let mut total_rounds: usize = 0;
-    let mut min_lat: Option<i64> = None;
-    let mut max_lat: Option<i64> = None;
-
-    for r in chunk {
-        total_rounds += r.scheduled_rounds as usize;
-        total_attempted += r.attempted_samples;
-        total_latency_bearing += r.latency_bearing_samples;
-        total_healthy += r.healthy_samples;
-        total_unhealthy += r.unhealthy_samples;
-        total_measurement_lost += r.measurement_loss_samples;
-
-        if let Some(min) = r.min_latency_ns {
-            min_lat = Some(min_lat.map_or(min, |m: i64| m.min(min)));
-        }
-        if let Some(max) = r.max_latency_ns {
-            max_lat = Some(max_lat.map_or(max, |m: i64| m.max(max)));
-        }
-
-        if let Some(ref blob) = r.histogram_blob
-            && let Some(other) = kemuri_core::Histogram::decode(blob)
-        {
-            histogram.merge(&other);
-        }
-    }
-
-    let p50 = histogram.quantile(0.5).map(|ns| (ns / 1_000) as i64);
-    let p95 = histogram.quantile(0.95).map(|ns| (ns / 1_000) as i64);
-
-    let total = (total_healthy + total_unhealthy + total_measurement_lost) as f64;
-    let ml_ratio = if total > 0.0 {
-        total_measurement_lost as f64 / total
-    } else {
-        0.0
-    };
-    let hf_ratio = if total > 0.0 {
-        total_unhealthy as f64 / total
-    } else {
-        0.0
-    };
-
-    SeriesPoint {
-        timestamp_ms: chrono::DateTime::parse_from_rfc3339(&first.bucket_start)
-            .map(|value| value.timestamp_millis())
-            .unwrap_or_default(),
-        bucket_status: if total_attempted == 0 {
-            "skipped".to_owned()
-        } else {
-            "observed".to_owned()
-        },
-        rounds_count: total_rounds,
-        attempted: total_attempted,
-        latency_bearing: total_latency_bearing,
-        healthy: total_healthy,
-        unhealthy: total_unhealthy,
-        measurement_lost: total_measurement_lost,
-        min_latency_us: min_lat.map(|ns| ns / 1_000),
-        p50_latency_us: p50,
-        p95_latency_us: p95,
-        max_latency_us: max_lat.map(|ns| ns / 1_000),
         measurement_loss_ratio: ml_ratio,
         health_failure_ratio: hf_ratio,
         histogram_bins: histogram.bins().to_vec(),
@@ -1343,7 +1476,7 @@ pub struct RoundsResponse {
 pub async fn get_rounds(
     State(state): State<AppState>,
     Path((target_id, check_id)): Path<(String, String)>,
-    Query(query): Query<RoundsQuery>,
+    ApiQuery(query): ApiQuery<RoundsQuery>,
 ) -> Result<Json<RoundsResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
@@ -1512,13 +1645,13 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
 )]
 pub async fn list_groups(
     State(state): State<AppState>,
-    Query(query): Query<PageQuery>,
+    ApiQuery(query): ApiQuery<PageQuery>,
 ) -> Result<Json<GroupsResponse>, ApiError> {
     let limit = validate_limit(query.limit, 100)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
     let all_targets = list_targets(
         State(state),
-        Query(PageQuery {
+        ApiQuery(PageQuery {
             limit: Some(200),
             cursor: None,
         }),
@@ -1562,7 +1695,7 @@ pub async fn get_group(
 ) -> Result<Json<GroupResponse>, ApiError> {
     let groups = list_groups(
         State(state),
-        Query(PageQuery {
+        ApiQuery(PageQuery {
             limit: Some(200),
             cursor: None,
         }),
@@ -1587,6 +1720,122 @@ pub struct GroupsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rollup_series_falls_back_to_raw_and_keeps_fixed_buckets() {
+        let storage = kemuri_storage::StorageManager::open_in_memory()
+            .await
+            .unwrap();
+        let pool = storage.pool();
+        let config: kemuri_config::KemuriConfig = serde_yaml::from_str(
+            r#"
+version: 1
+profiles:
+  - kind: http
+    id: web
+    url: http://127.0.0.1
+    interval: 30s
+    timeout: 1s
+targets:
+  - id: host
+    address: 127.0.0.1
+    checks:
+      - id: health
+        profile: web
+"#,
+        )
+        .unwrap();
+        kemuri_storage::reconcile(pool, &config).await.unwrap();
+        let target = kemuri_storage::TargetRepo::get_by_target_id(pool, "host")
+            .await
+            .unwrap()
+            .unwrap();
+        let check = kemuri_storage::CheckRepo::get(pool, target.internal_id, "health")
+            .await
+            .unwrap()
+            .unwrap();
+        let observer_id: i64 =
+            sqlx::query_scalar("SELECT internal_id FROM observers WHERE observer_id = 'local'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        kemuri_storage::RollupRepo::upsert(
+            pool,
+            &kemuri_storage::InsertRollup {
+                check_internal_id: check.internal_id,
+                observer_internal_id: observer_id,
+                resolution_seconds: 300,
+                bucket_start: "2024-01-01T00:00:00Z".to_owned(),
+                scheduled_rounds: 1,
+                completed_rounds: 1,
+                partial_rounds: 0,
+                configured_sample_slots: 1,
+                attempted_samples: 1,
+                latency_bearing_samples: 1,
+                healthy_samples: 1,
+                unhealthy_samples: 0,
+                measurement_loss_samples: 0,
+                outcome_counts: "{}".to_owned(),
+                min_latency_ns: Some(1_000_000),
+                max_latency_ns: Some(1_000_000),
+                sum_latency_ns: 1_000_000,
+                histogram_version: 1,
+                histogram_blob: None,
+                no_data_counts: "{}".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        kemuri_storage::RoundRepo::insert(
+            pool,
+            &kemuri_storage::InsertRound {
+                check_internal_id: check.internal_id,
+                observer_internal_id: observer_id,
+                scheduled_at: "2024-01-01T00:05:30Z".to_owned(),
+                started_at: None,
+                finished_at: None,
+                execution_status: "complete".to_owned(),
+                stop_reason: None,
+                configured_samples: 1,
+                attempted_samples: 1,
+                latency_bearing_samples: 1,
+                healthy_samples: 1,
+                unhealthy_samples: 0,
+                measurement_loss_samples: 0,
+                min_latency_ns: Some(2_000_000),
+                median_latency_ns: Some(2_000_000),
+                max_latency_ns: Some(2_000_000),
+                sample_blob: None,
+                outcome_summary: None,
+                config_generation: None,
+                check_revision_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let from = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap();
+        let to = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:15:00Z").unwrap();
+        let (points, resolution) =
+            build_series_from_rollups(pool, check.internal_id, observer_id, 300, &from, &to, 100)
+                .await
+                .unwrap();
+
+        assert_eq!(resolution, 300);
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].bucket_status, "observed");
+        assert_eq!(points[1].bucket_status, "observed");
+        assert_eq!(points[1].min_latency_us, Some(2_000));
+        assert_eq!(points[2].bucket_status, "missing");
+
+        let (merged, resolution) =
+            build_series_from_rollups(pool, check.internal_id, observer_id, 300, &from, &to, 2)
+                .await
+                .unwrap();
+        assert_eq!(resolution, 600);
+        assert_eq!(merged.len(), 2);
+    }
 
     #[test]
     fn rollup_to_series_point_basic() {
@@ -1681,7 +1930,8 @@ mod tests {
             no_data_counts: "{}".to_owned(),
         };
 
-        let merged = merge_rollups(&[row1, row2]);
+        let merged =
+            merge_series_points(&[rollup_to_series_point(&row1), rollup_to_series_point(&row2)]);
         assert_eq!(merged.rounds_count, 10);
         assert_eq!(merged.healthy, 22);
         assert_eq!(merged.unhealthy, 2);

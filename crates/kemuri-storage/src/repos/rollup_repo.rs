@@ -46,7 +46,18 @@ impl RollupRepo {
         to: &str,
     ) -> Result<Vec<RollupRow>, sqlx::Error> {
         sqlx::query_as::<_, RollupRow>(
-            "SELECT check_internal_id, observer_internal_id, resolution_seconds, bucket_start, scheduled_rounds, completed_rounds, partial_rounds, configured_sample_slots, attempted_samples, latency_bearing_samples, healthy_samples, unhealthy_samples, measurement_loss_samples, outcome_counts, min_latency_ns, max_latency_ns, sum_latency_ns, histogram_version, histogram_blob, no_data_counts FROM rollups WHERE check_internal_id = ? AND observer_internal_id = ? AND resolution_seconds = ? AND bucket_start >= ? AND bucket_start < ? ORDER BY bucket_start ASC",
+            "SELECT check_internal_id, observer_internal_id, resolution_seconds, bucket_start,
+                    scheduled_rounds, completed_rounds, partial_rounds,
+                    configured_sample_slots, attempted_samples, latency_bearing_samples,
+                    healthy_samples, unhealthy_samples, measurement_loss_samples,
+                    outcome_counts, min_latency_ns, max_latency_ns, sum_latency_ns,
+                    histogram_version, histogram_blob, no_data_counts
+             FROM rollups
+             WHERE check_internal_id = ? AND observer_internal_id = ?
+               AND resolution_seconds = ?
+               AND unixepoch(bucket_start) >= unixepoch(?)
+               AND unixepoch(bucket_start) < unixepoch(?)
+             ORDER BY unixepoch(bucket_start) ASC",
         )
         .bind(check_internal_id)
         .bind(observer_internal_id)
@@ -93,10 +104,14 @@ impl RollupRepo {
         batch_size: i64,
     ) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
-            "DELETE FROM rollups WHERE resolution_seconds = ? AND bucket_start < ? AND internal_id IN (SELECT check_internal_id FROM rollups r2 WHERE r2.check_internal_id = rollups.check_internal_id AND r2.resolution_seconds = ? AND r2.bucket_start < ? LIMIT ?)",
+            "DELETE FROM rollups
+             WHERE rowid IN (
+                 SELECT rowid FROM rollups
+                 WHERE resolution_seconds = ? AND bucket_start < ?
+                 ORDER BY bucket_start
+                 LIMIT ?
+             )",
         )
-        .bind(resolution_seconds)
-        .bind(before)
         .bind(resolution_seconds)
         .bind(before)
         .bind(batch_size)

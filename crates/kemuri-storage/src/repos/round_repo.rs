@@ -96,6 +96,47 @@ impl RoundRepo {
         .await
     }
 
+    pub async fn query_without_matching_rollup(
+        pool: &SqlitePool,
+        check_internal_id: i64,
+        observer_internal_id: i64,
+        resolution_seconds: i64,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<RoundRow>, sqlx::Error> {
+        sqlx::query_as::<_, RoundRow>(
+            "SELECT r.internal_id, r.check_internal_id, r.observer_internal_id,
+                    r.scheduled_at, r.started_at, r.finished_at, r.execution_status,
+                    r.stop_reason, r.configured_samples, r.attempted_samples,
+                    r.latency_bearing_samples, r.healthy_samples, r.unhealthy_samples,
+                    r.measurement_loss_samples, r.min_latency_ns, r.median_latency_ns,
+                    r.max_latency_ns, r.sample_blob, r.outcome_summary, r.config_generation,
+                    r.check_revision_id, r.created_at
+             FROM rounds r
+             WHERE r.check_internal_id = ?
+               AND r.observer_internal_id = ?
+               AND unixepoch(r.scheduled_at) >= unixepoch(?)
+               AND unixepoch(r.scheduled_at) < unixepoch(?)
+               AND NOT EXISTS (
+                   SELECT 1 FROM rollups ru
+                   WHERE ru.check_internal_id = r.check_internal_id
+                     AND ru.observer_internal_id = r.observer_internal_id
+                     AND ru.resolution_seconds = ?
+                     AND unixepoch(r.scheduled_at) >= unixepoch(ru.bucket_start)
+                     AND unixepoch(r.scheduled_at) <
+                         unixepoch(ru.bucket_start) + ru.resolution_seconds
+               )
+             ORDER BY r.scheduled_at ASC",
+        )
+        .bind(check_internal_id)
+        .bind(observer_internal_id)
+        .bind(from)
+        .bind(to)
+        .bind(resolution_seconds)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn query_recent_by_check(
         pool: &SqlitePool,
         check_internal_id: i64,

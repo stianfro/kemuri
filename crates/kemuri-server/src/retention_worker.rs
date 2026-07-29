@@ -29,9 +29,26 @@ impl RetentionWorker {
                 }
             }
 
-            if let Err(e) = self.run_cycle().await {
-                tracing::error!(error = %e, "retention worker cycle failed");
-                metrics::counter!("kemuri_retention_errors").increment(1);
+            match self.run_cycle().await {
+                Ok(()) => {
+                    if let Some(suppressed) = crate::failure_log::recovery("retention", "database")
+                    {
+                        tracing::info!(
+                            suppressed,
+                            "retention worker recovered after repeated failures"
+                        );
+                    }
+                }
+                Err(e) => {
+                    if let Some(suppressed) = crate::failure_log::failure("retention", "database") {
+                        tracing::error!(
+                            error = %e,
+                            suppressed,
+                            "retention worker cycle failed"
+                        );
+                    }
+                    metrics::counter!("kemuri_retention_errors").increment(1);
+                }
             }
         }
     }
@@ -104,7 +121,7 @@ impl RetentionWorker {
             return Ok(());
         }
 
-        let deleted = RollupRepo::delete_before_simple(&self.pool, 300, &cutoff_str).await?;
+        let deleted = self.delete_rollups_before(300, &cutoff_str).await?;
         if deleted > 0 {
             tracing::info!(deleted, "retention: deleted 5-minute rollups");
             metrics::counter!("kemuri_retention_rollup_5m_deleted").increment(deleted);
@@ -122,13 +139,35 @@ impl RetentionWorker {
         let cutoff = Utc::now() - chrono::Duration::from_std(retention).unwrap_or_default();
         let cutoff_str = cutoff.to_rfc3339();
 
-        let deleted = RollupRepo::delete_before_simple(&self.pool, 3600, &cutoff_str).await?;
+        let deleted = self.delete_rollups_before(3600, &cutoff_str).await?;
         if deleted > 0 {
             tracing::info!(deleted, "retention: deleted 1-hour rollups");
             metrics::counter!("kemuri_retention_rollup_1h_deleted").increment(deleted);
         }
 
         Ok(())
+    }
+
+    async fn delete_rollups_before(
+        &self,
+        resolution_seconds: i64,
+        cutoff: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let mut total_deleted = 0;
+        loop {
+            let deleted = RollupRepo::delete_before(
+                &self.pool,
+                resolution_seconds,
+                cutoff,
+                DELETE_BATCH_SIZE,
+            )
+            .await?;
+            total_deleted += deleted;
+            if deleted == 0 {
+                return Ok(total_deleted);
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn enforce_alert_events_retention(&self) -> Result<(), sqlx::Error> {

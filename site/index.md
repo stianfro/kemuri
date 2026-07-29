@@ -11,7 +11,6 @@ next: false
 ---
 
 <section class="home-intro">
-  <p class="home-intro__eyebrow">Open source · MIT License</p>
   <h1>Kemuri</h1>
   <p class="home-intro__summary">
     Kemuri is a single-node latency monitor for Linux. It runs ICMP, HTTP,

@@ -95,7 +95,7 @@ export default defineConfig({
     },
     footer: {
       message: "Kemuri is available under the MIT License.",
-      copyright: "Copyright © 2026 Stian Frostad",
+      copyright: "Copyright © 2026 Stian Frøystein",
     },
     outline: {
       level: [2, 3],

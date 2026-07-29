@@ -82,7 +82,7 @@ impl Scheduler {
         let probe_limits = self.config.max_concurrent_by_probe.clone();
         let fatal_tx = self.fatal_tx.clone();
 
-        let handle = tokio::spawn(async move {
+        let handle = crate::spawn_required_task("scheduler", fatal_tx, async move {
             let tick_interval =
                 kemuri_core::parse_duration(&tick_interval_str).unwrap_or(Duration::from_secs(1));
 
@@ -317,11 +317,6 @@ impl Scheduler {
 
                 let queue_depth = queue.max_capacity() - queue.capacity();
                 metrics::gauge!("kemuri_scheduler_queue_depth").set(queue_depth as f64);
-            }
-            if !*shutdown_rx.borrow()
-                && let Some(sender) = fatal_tx
-            {
-                let _ = sender.try_send("scheduler");
             }
         });
 

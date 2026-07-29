@@ -53,7 +53,7 @@ impl WorkerPool {
             let running_rounds = running_rounds.clone();
             let fatal_tx = self.fatal_tx.clone();
 
-            let handle = tokio::spawn(async move {
+            let handle = crate::spawn_required_task("probe_worker", fatal_tx, async move {
                 loop {
                     let job = {
                         let mut rx = job_rx.lock().await;
@@ -80,9 +80,6 @@ impl WorkerPool {
                         tracing::debug!(worker_id, "worker shutting down: result channel closed");
                         break;
                     }
-                }
-                if let Some(sender) = fatal_tx {
-                    let _ = sender.try_send("probe_worker");
                 }
             });
 

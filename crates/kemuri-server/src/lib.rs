@@ -12,6 +12,7 @@ mod writer;
 
 use std::collections::HashMap;
 use std::future::IntoFuture;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +26,7 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use futures::FutureExt;
 use futures::stream::Stream;
 use kemuri_config::KemuriConfig;
 use kemuri_core::BuildInfo;
@@ -129,6 +131,24 @@ pub enum ServerError {
     Storage(String),
 }
 
+pub(crate) fn spawn_required_task<F>(
+    name: &'static str,
+    fatal_tx: Option<mpsc::Sender<&'static str>>,
+    future: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if AssertUnwindSafe(future).catch_unwind().await.is_err() {
+            tracing::error!(component = name, "required runtime task panicked");
+        }
+        if let Some(sender) = fatal_tx {
+            let _ = sender.try_send(name);
+        }
+    })
+}
+
 pub async fn serve(
     config: KemuriConfig,
     build_info: BuildInfo,
@@ -224,11 +244,10 @@ pub async fn serve(
     let writer = StorageWriter::new(writer_storage.clone(), observer_internal_id)
         .with_alert_channel(alert_tx)
         .with_event_channel(event_tx.clone());
-    let fatal_writer = fatal_tx.clone();
-    let mut writer_handle = tokio::spawn(async move {
-        writer.run(result_rx).await;
-        let _ = fatal_writer.send("storage_writer").await;
-    });
+    let mut writer_handle =
+        spawn_required_task("storage_writer", Some(fatal_tx.clone()), async move {
+            writer.run(result_rx).await
+        });
 
     let alert_evaluator = AlertEvaluator::new(
         Arc::new(writer_storage.pool().clone()),
@@ -237,11 +256,10 @@ pub async fn serve(
         observer_internal_id,
     )
     .with_event_channel(event_tx.clone());
-    let fatal_alert = fatal_tx.clone();
-    let mut alert_handle = tokio::spawn(async move {
-        alert_evaluator.run(alert_rx).await;
-        let _ = fatal_alert.send("alert_evaluator").await;
-    });
+    let mut alert_handle =
+        spawn_required_task("alert_evaluator", Some(fatal_tx.clone()), async move {
+            alert_evaluator.run(alert_rx).await
+        });
 
     let notifier_map =
         build_notifiers(&config).map_err(|error| ServerError::Storage(error.to_string()))?;
@@ -256,11 +274,10 @@ pub async fn serve(
         config.server.public_url.clone(),
     );
     let notification_shutdown = worker_shutdown_tx.subscribe();
-    let fatal_notification = fatal_tx.clone();
-    let mut notification_handle = tokio::spawn(async move {
-        notification_worker.run(notification_shutdown).await;
-        let _ = fatal_notification.send("notification_worker").await;
-    });
+    let mut notification_handle =
+        spawn_required_task("notification_worker", Some(fatal_tx.clone()), async move {
+            notification_worker.run(notification_shutdown).await
+        });
 
     let no_data_evaluator = AlertEvaluator::new(
         Arc::new(writer_storage.pool().clone()),
@@ -270,41 +287,38 @@ pub async fn serve(
     )
     .with_event_channel(event_tx.clone());
     let mut no_data_shutdown = worker_shutdown_tx.subscribe();
-    let fatal_no_data = fatal_tx.clone();
-    let mut no_data_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    no_data_evaluator.run_no_data_check().await;
-                }
-                _ = no_data_shutdown.recv() => {
-                    let _ = fatal_no_data.send("no_data_evaluator").await;
-                    return;
+    let mut no_data_handle =
+        spawn_required_task("no_data_evaluator", Some(fatal_tx.clone()), async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        no_data_evaluator.run_no_data_check().await;
+                    }
+                    _ = no_data_shutdown.recv() => {
+                        return;
+                    }
                 }
             }
-        }
-    });
+        });
 
     let rollup_pool = pool.clone();
     let rollup_shutdown = worker_shutdown_tx.subscribe();
     let rollup_worker = rollup_worker::RollupWorker::new(Arc::new(rollup_pool));
-    let fatal_rollup = fatal_tx.clone();
-    let mut rollup_handle = tokio::spawn(async move {
-        rollup_worker.run(rollup_shutdown).await;
-        let _ = fatal_rollup.send("rollup_worker").await;
-    });
+    let mut rollup_handle =
+        spawn_required_task("rollup_worker", Some(fatal_tx.clone()), async move {
+            rollup_worker.run(rollup_shutdown).await
+        });
 
     let retention_pool = pool.clone();
     let retention_shutdown = worker_shutdown_tx.subscribe();
     let retention_config = config.storage.retention.clone();
     let retention_worker =
         retention_worker::RetentionWorker::new(Arc::new(retention_pool), retention_config);
-    let fatal_retention = fatal_tx.clone();
-    let mut retention_handle = tokio::spawn(async move {
-        retention_worker.run(retention_shutdown).await;
-        let _ = fatal_retention.send("retention_worker").await;
-    });
+    let mut retention_handle =
+        spawn_required_task("retention_worker", Some(fatal_tx.clone()), async move {
+            retention_worker.run(retention_shutdown).await
+        });
 
     scheduler_inst.start();
     let disk_ready = Arc::new(AtomicBool::new(true));
@@ -312,7 +326,7 @@ pub async fn serve(
     let disk_config = shared_config.clone();
     let disk_scheduler = scheduler_inst.command_sender();
     let disk_ready_worker = disk_ready.clone();
-    let mut disk_handle = tokio::spawn(async move {
+    let mut disk_handle = spawn_required_task("disk_monitor", Some(fatal_tx.clone()), async move {
         let mut paused = false;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -1042,5 +1056,18 @@ mod openapi_tests {
         .collect();
         assert_eq!(actual, expected);
         assert_eq!(document.info.version, env!("CARGO_PKG_VERSION"));
+    }
+}
+
+#[cfg(test)]
+mod required_task_tests {
+    #[tokio::test]
+    async fn panic_is_reported_as_a_fatal_task_exit() {
+        let (fatal_tx, mut fatal_rx) = tokio::sync::mpsc::channel(1);
+        let handle = super::spawn_required_task("test_task", Some(fatal_tx), async {
+            panic!("injected task failure");
+        });
+        handle.await.unwrap();
+        assert_eq!(fatal_rx.recv().await, Some("test_task"));
     }
 }

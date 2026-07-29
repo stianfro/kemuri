@@ -114,6 +114,8 @@ Alert states are evaluated only for checks that use the rule profile. A rule can
 
 Send `SIGHUP`, or make a same-origin JSON `POST` to `/api/v1/config/reload`, to reload the file. Kemuri validates the new state before it replaces the active state. A failed reload leaves the active configuration in place. Cross-origin reload requests are rejected.
 
+For the complete field reference, see [Configuration version 1](docs/configuration.md).
+
 ## API
 
 All endpoints are under `/api/v1/`. Key endpoints:
@@ -132,6 +134,8 @@ All endpoints are under `/api/v1/`. Key endpoints:
 API timestamps use Unix milliseconds and latency values use integer microseconds. Range queries use `from_ms` and `to_ms`. Collection limits are from 1 through 200. Cursor values are opaque.
 
 API errors contain a request ID. The same value is returned in `X-Request-ID`. Unknown API routes return JSON. Missing static assets return a normal HTTP 404.
+
+For the full contract and unit rules, see [HTTP API version 1](docs/api.md).
 
 ## Backups
 

@@ -1,15 +1,20 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1-bookworm AS builder
 ARG KEMURI_GIT_HASH=unknown
+ARG TARGETARCH
 ENV KEMURI_GIT_HASH=$KEMURI_GIT_HASH
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p kemuri
+RUN --mount=type=cache,id=kemuri-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=kemuri-target-${TARGETARCH},target=/app/target,sharing=locked \
+    cargo build --locked --release -p kemuri \
+    && cp /app/target/release/kemuri /tmp/kemuri
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN useradd -r -s /bin/false kemuri \
     && install -d -o kemuri -g kemuri /var/lib/kemuri /etc/kemuri
-COPY --from=builder /app/target/release/kemuri /usr/local/bin/kemuri
+COPY --from=builder /tmp/kemuri /usr/local/bin/kemuri
 WORKDIR /var/lib/kemuri
 USER kemuri
 EXPOSE 8080

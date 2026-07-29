@@ -224,7 +224,7 @@ impl HttpProbe {
                     return SampleResult {
                         outcome: Self::classify_request_error(&error),
                         latency: None,
-                        detail: Some(error.to_string()),
+                        detail: Some("response body read failed".to_owned()),
                         metadata: None,
                     };
                 }
@@ -250,7 +250,7 @@ impl HttpProbe {
                 SampleResult {
                     outcome,
                     latency: None,
-                    detail: Some(err.to_string()),
+                    detail: Some(format!("HTTP request failed: {:?}", outcome)),
                     metadata: None,
                 }
             }

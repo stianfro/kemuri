@@ -100,21 +100,15 @@ impl Notifier for WebhookNotifier {
         let response = request
             .send()
             .await
-            .map_err(|e| NotificationError::Delivery(format!("webhook request failed: {}", e)))?;
+            .map_err(|_| NotificationError::Delivery("webhook request failed".to_owned()))?;
 
         let status = response.status();
         if status.as_u16() >= 200 && status.as_u16() < 300 {
             Ok(())
         } else {
-            let body_text = response.text().await.unwrap_or_default();
-            let truncated = if body_text.len() > 1024 {
-                &body_text[..1024]
-            } else {
-                &body_text
-            };
             Err(NotificationError::Delivery(format!(
-                "webhook returned status {}: {}",
-                status, truncated
+                "webhook returned status {}",
+                status
             )))
         }
     }

@@ -113,7 +113,7 @@ impl NotificationWorker {
                         NotificationOutboxRepo::mark_failed(
                             &self.pool,
                             entry.internal_id,
-                            &e.to_string(),
+                            "notification delivery failed",
                         )
                         .await?;
                     } else {
@@ -123,7 +123,7 @@ impl NotificationWorker {
                             &self.pool,
                             entry.internal_id,
                             &next.to_rfc3339(),
-                            &e.to_string(),
+                            "notification delivery failed",
                         )
                         .await?;
                     }
@@ -141,10 +141,9 @@ impl NotificationWorker {
                     .increment(1);
                     metrics::gauge!("kemuri_notification_outbox_pending").decrement(1.0);
                 }
-                Err(e) => {
+                Err(_) => {
                     tracing::warn!(
                         notifier_id = %entry.notifier_id,
-                        error = %e,
                         "notification delivery failed"
                     );
                     metrics::counter!("kemuri_notification_attempts_total",
@@ -156,7 +155,7 @@ impl NotificationWorker {
                         NotificationOutboxRepo::mark_failed(
                             &self.pool,
                             entry.internal_id,
-                            &e.to_string(),
+                            "notification delivery failed",
                         )
                         .await?;
                     } else {
@@ -166,7 +165,7 @@ impl NotificationWorker {
                             &self.pool,
                             entry.internal_id,
                             &next.to_rfc3339(),
-                            &e.to_string(),
+                            "notification delivery failed",
                         )
                         .await?;
                     }

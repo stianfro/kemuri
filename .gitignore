@@ -9,5 +9,7 @@ node_modules
 *.db
 *.db-shm
 *.db-wal
+/.claude/
+/.agents/
 web/test-results/
 web/playwright-report/

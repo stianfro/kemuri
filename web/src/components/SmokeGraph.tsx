@@ -165,32 +165,43 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     const lossTop = graphBottom + 2;
     const healthTop = lossTop + STRIP_HEIGHT + 2;
 
-    const cellW = plotW / points.length;
+    const timeToX = (timestampMs: number) =>
+      PADDING.left +
+      ((timestampMs - data.from_ms) / Math.max(1, data.to_ms - data.from_ms)) * plotW;
+    const pointBounds = (index: number) => {
+      const point = points[index]!;
+      const nextTimestamp = points[index + 1]?.timestamp_ms ?? data.to_ms;
+      const start = Math.max(PADDING.left, Math.min(PADDING.left + plotW, timeToX(point.timestamp_ms)));
+      const end = Math.max(start, Math.min(PADDING.left + plotW, timeToX(nextTimestamp)));
+      return { start, width: Math.max(0.5, end - start), center: start + (end - start) / 2 };
+    };
 
     for (let index = 0; index < points.length; index += 1) {
       const point = points[index]!;
       if (point.bucket_status === 'observed') continue;
-      const x = PADDING.left + index * cellW;
+      const { start: x, width } = pointBounds(index);
       ctx.fillStyle =
         point.bucket_status === 'missing'
           ? 'rgba(107,114,128,0.22)'
           : 'rgba(245,158,11,0.18)';
-      ctx.fillRect(x, graphTop, cellW + 0.5, healthTop + STRIP_HEIGHT - graphTop);
+      ctx.fillRect(x, graphTop, width + 0.5, healthTop + STRIP_HEIGHT - graphTop);
       if (point.bucket_status === 'skipped') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, graphTop, width, healthTop + STRIP_HEIGHT - graphTop);
+        ctx.clip();
         ctx.strokeStyle = 'rgba(245,158,11,0.45)';
         ctx.lineWidth = 1;
-        for (let offset = -graphH; offset < cellW + graphH; offset += 8) {
+        for (let offset = -graphH; offset < width + graphH; offset += 8) {
           ctx.beginPath();
           ctx.moveTo(x + offset, healthTop + STRIP_HEIGHT);
           ctx.lineTo(x + offset + graphH, graphTop);
           ctx.stroke();
         }
+        ctx.restore();
       }
     }
 
-    const timeToX = (timestampMs: number) =>
-      PADDING.left +
-      ((timestampMs - data.from_ms) / Math.max(1, data.to_ms - data.from_ms)) * plotW;
     const firingByRule = new Map<string, number>();
     for (const event of data.alert_events) {
       if (event.event_type === 'firing') {
@@ -232,7 +243,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     }
 
     for (let i = 0; i < points.length; i++) {
-      const x = PADDING.left + i * cellW;
+      const { start: x, width } = pointBounds(i);
       const bins = points[i]!.histogram_bins;
 
       for (let b = 0; b < numBins && b < bins.length; b++) {
@@ -251,21 +262,23 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
         const alpha = 0.2 + intensity * 0.8;
 
         ctx.fillStyle = `rgba(${r},${g},${bl},${alpha})`;
-        ctx.fillRect(x, py - cellH / 2, cellW + 0.5, cellH);
+        ctx.fillRect(x, py - cellH / 2, width + 0.5, cellH);
       }
     }
 
     ctx.strokeStyle = '#22c55e';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
+    let medianStarted = false;
     for (let i = 0; i < points.length; i++) {
-      const x = PADDING.left + i * cellW + cellW / 2;
+      const x = pointBounds(i).center;
       const p50 =
         points[i]!.p50_latency_us == null ? null : points[i]!.p50_latency_us! / 1000;
       if (p50 != null) {
         const y = yToPixel(p50);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (medianStarted) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+        medianStarted = true;
       }
     }
     ctx.stroke();
@@ -274,38 +287,45 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
+    let p95Started = false;
     for (let i = 0; i < points.length; i++) {
-      const x = PADDING.left + i * cellW + cellW / 2;
+      const x = pointBounds(i).center;
       const p95 =
         points[i]!.p95_latency_us == null ? null : points[i]!.p95_latency_us! / 1000;
       if (p95 != null) {
         const y = yToPixel(p95);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (p95Started) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+        p95Started = true;
       }
     }
     ctx.stroke();
     ctx.setLineDash([]);
 
     for (let i = 0; i < points.length; i++) {
-      const x = PADDING.left + i * cellW;
+      const { start: x, width } = pointBounds(i);
       const p = points[i]!;
       const total = p.healthy + p.unhealthy + p.measurement_lost;
-      if (total > 0) {
+      if (total > 0 && p.measurement_lost > 0) {
         const lossRatio = p.measurement_lost / total;
         const lossAlpha = Math.min(0.2 + lossRatio * 3, 1);
         ctx.fillStyle = `rgba(239,68,68,${lossAlpha})`;
-        ctx.fillRect(x, lossTop, cellW + 0.5, STRIP_HEIGHT);
+        ctx.fillRect(x, lossTop, width + 0.5, STRIP_HEIGHT);
 
         if (lossRatio > 0.1) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, lossTop, width, STRIP_HEIGHT);
+          ctx.clip();
           ctx.strokeStyle = 'rgba(239,68,68,0.6)';
           ctx.lineWidth = 0.5;
-          for (let s = 0; s < cellW; s += 6) {
+          for (let s = 0; s < width; s += 6) {
             ctx.beginPath();
             ctx.moveTo(x + s, lossTop + STRIP_HEIGHT);
             ctx.lineTo(x + s + STRIP_HEIGHT, lossTop);
             ctx.stroke();
           }
+          ctx.restore();
         }
       }
 
@@ -313,17 +333,22 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
         const hfRatio = p.unhealthy / total;
         const hfAlpha = Math.min(0.2 + hfRatio * 3, 1);
         ctx.fillStyle = `rgba(245,158,11,${hfAlpha})`;
-        ctx.fillRect(x, healthTop, cellW + 0.5, STRIP_HEIGHT);
+        ctx.fillRect(x, healthTop, width + 0.5, STRIP_HEIGHT);
 
         if (hfRatio > 0.05) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, healthTop, width, STRIP_HEIGHT);
+          ctx.clip();
           ctx.strokeStyle = 'rgba(245,158,11,0.5)';
           ctx.lineWidth = 0.5;
-          for (let s = 0; s < cellW; s += 4) {
+          for (let s = 0; s < width; s += 4) {
             ctx.beginPath();
             ctx.moveTo(x + s, healthTop);
             ctx.lineTo(x + s + STRIP_HEIGHT, healthTop + STRIP_HEIGHT);
             ctx.stroke();
           }
+          ctx.restore();
         }
       }
     }
@@ -371,7 +396,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     );
     const xStep = Math.max(1, Math.floor(points.length / xLabelCount));
     for (let i = 0; i < points.length; i += xStep) {
-      const x = PADDING.left + i * cellW + cellW / 2;
+      const x = pointBounds(i).center;
       const pt = points[i];
       const label = pt ? formatAxisTime(pt.timestamp_ms) : '';
       ctx.fillText(label, x, canvasSize.height - PADDING.bottom + 20);
@@ -388,8 +413,15 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
       const mx = e.clientX - rect.left;
 
       const plotW = canvasSize.width - PADDING.left - PADDING.right;
-      const cellW = plotW / data.points.length;
-      const idx = Math.floor((mx - PADDING.left) / cellW);
+      if (mx < PADDING.left || mx > PADDING.left + plotW) {
+        setTooltip(null);
+        return;
+      }
+      const timestampMs =
+        data.from_ms +
+        ((mx - PADDING.left) / Math.max(1, plotW)) * (data.to_ms - data.from_ms);
+      const nextIndex = data.points.findIndex((point) => point.timestamp_ms > timestampMs);
+      const idx = nextIndex === -1 ? data.points.length - 1 : Math.max(0, nextIndex - 1);
 
       if (idx >= 0 && idx < data.points.length) {
         const point = data.points[idx]!;
@@ -408,9 +440,9 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
   const resolutionLabel = data
     ? data.resolution_ms === 0
       ? 'Raw'
-      : data.resolution_ms <= 300000
-        ? '5-min rollups'
-        : '1-hour rollups'
+      : data.resolution_ms < 3600000
+        ? `${Math.round(data.resolution_ms / 60000)}-min rollups`
+        : `${Math.round(data.resolution_ms / 3600000)}-hour rollups`
     : '';
 
   const graphSummary = data

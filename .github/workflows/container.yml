@@ -39,6 +39,7 @@ jobs:
           context: .
           file: packaging/container/Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: KEMURI_GIT_HASH=${{ github.sha }}
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}

@@ -1,4 +1,6 @@
 FROM rust:1-bookworm AS builder
+ARG KEMURI_GIT_HASH=unknown
+ENV KEMURI_GIT_HASH=$KEMURI_GIT_HASH
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p kemuri

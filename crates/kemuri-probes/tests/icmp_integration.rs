@@ -116,3 +116,32 @@ async fn icmp_multiple_samples() {
         result.results
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn icmp_concurrent_rounds_do_not_steal_replies() {
+    let rounds: Vec<_> = (0..8)
+        .map(|index| {
+            let probe = IcmpProbe::new(IcmpProbeConfig::default());
+            let mut check = make_icmp_check("127.0.0.1");
+            check.check_id = CheckId::new(format!("test-icmp-{index}")).unwrap();
+            check.target_id = TargetId::new(format!("test-target-{index}")).unwrap();
+            check.sample_count = 20;
+            check.timeout = Duration::from_secs(5);
+            tokio::spawn(async move { probe.execute_round(make_context(), check).await })
+        })
+        .collect();
+
+    for round in rounds {
+        let result = round.await.unwrap().unwrap();
+        assert_eq!(result.results.len(), 20);
+        assert!(
+            result
+                .results
+                .iter()
+                .all(|sample| sample.outcome == SampleOutcome::Success),
+            "expected all concurrent ICMP samples to succeed, got: {:?}",
+            result.results
+        );
+    }
+}

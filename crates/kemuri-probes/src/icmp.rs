@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,7 +22,7 @@ const ICMP_TIME_EXCEEDED_V6: u8 = 3;
 
 const DEFAULT_PAYLOAD_SIZE: usize = 56;
 const RECV_BUFFER_SIZE: usize = 2048;
-const MAX_RECV_ATTEMPTS: usize = 10;
+static NEXT_RAW_IDENTIFIER: AtomicU16 = AtomicU16::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,7 +126,7 @@ impl IcmpProbe {
     fn create_socket(
         &self,
         is_ipv6: bool,
-    ) -> Result<(UdpSocket, SocketMethod), ProbeExecutionError> {
+    ) -> Result<(UdpSocket, SocketMethod, u16), ProbeExecutionError> {
         let domain = if is_ipv6 { Domain::IPV6 } else { Domain::IPV4 };
         let protocol = if is_ipv6 {
             Protocol::ICMPV6
@@ -135,8 +136,29 @@ impl IcmpProbe {
 
         let (socket, method) = try_create_socket_for_probe(domain, protocol)?;
 
-        let identifier = std::process::id() as u16;
-        bind_icmp_socket(&socket, is_ipv6, identifier)?;
+        let requested_identifier = match method {
+            SocketMethod::Dgram => 0,
+            SocketMethod::Raw => next_raw_identifier(),
+        };
+        bind_icmp_socket(
+            &socket,
+            is_ipv6,
+            requested_identifier,
+            self.config.source_address.as_deref(),
+        )?;
+        let identifier = match method {
+            SocketMethod::Dgram => socket
+                .local_addr()
+                .map_err(|e| ProbeExecutionError::Internal(e.to_string()))?
+                .as_socket()
+                .ok_or_else(|| {
+                    ProbeExecutionError::Internal(
+                        "ICMP socket did not have an IP local address".to_owned(),
+                    )
+                })?
+                .port(),
+            SocketMethod::Raw => requested_identifier,
+        };
 
         socket
             .set_nonblocking(true)
@@ -146,7 +168,7 @@ impl IcmpProbe {
         let tokio_socket = UdpSocket::from_std(std_socket)
             .map_err(|e| ProbeExecutionError::Internal(e.to_string()))?;
 
-        Ok((tokio_socket, method))
+        Ok((tokio_socket, method, identifier))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -171,15 +193,13 @@ impl IcmpProbe {
 
         let deadline = start + timeout;
         let mut buf = [0u8; RECV_BUFFER_SIZE];
-        let mut attempts = 0;
-
         loop {
             let now = std::time::Instant::now();
             let remaining = deadline.saturating_duration_since(now);
             if remaining.is_zero() {
                 return SampleResult {
                     outcome: SampleOutcome::Timeout,
-                    latency: Some(start.elapsed()),
+                    latency: None,
                     detail: Some("icmp receive timeout".to_owned()),
                     metadata: None,
                 };
@@ -208,15 +228,6 @@ impl IcmpProbe {
                             };
                         }
                         ParsedReply::Retry => {
-                            attempts += 1;
-                            if attempts >= MAX_RECV_ATTEMPTS {
-                                return SampleResult {
-                                    outcome: SampleOutcome::Timeout,
-                                    latency: Some(start.elapsed()),
-                                    detail: Some("icmp max retry attempts".to_owned()),
-                                    metadata: None,
-                                };
-                            }
                             continue;
                         }
                     }
@@ -225,7 +236,7 @@ impl IcmpProbe {
                 Err(_) => {
                     return SampleResult {
                         outcome: SampleOutcome::Timeout,
-                        latency: Some(start.elapsed()),
+                        latency: None,
                         detail: Some("icmp receive timeout".to_owned()),
                         metadata: None,
                     };
@@ -258,16 +269,30 @@ fn bind_icmp_socket(
     socket: &Socket,
     is_ipv6: bool,
     identifier: u16,
+    source_address: Option<&str>,
 ) -> Result<(), ProbeExecutionError> {
-    let addr = if is_ipv6 {
-        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), identifier)
-    } else {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), identifier)
+    let ip = match source_address {
+        Some(value) => value.parse::<IpAddr>().map_err(|e| {
+            ProbeExecutionError::Internal(format!("invalid ICMP source address: {e}"))
+        })?,
+        None if is_ipv6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
+    if ip.is_ipv6() != is_ipv6 {
+        return Err(ProbeExecutionError::Internal(
+            "ICMP source address family does not match target".to_owned(),
+        ));
+    }
+    let addr = SocketAddr::new(ip, identifier);
     let sock_addr = socket2::SockAddr::from(addr);
     socket
         .bind(&sock_addr)
         .map_err(|e| ProbeExecutionError::Internal(format!("ICMP bind error: {}", e)))
+}
+
+fn next_raw_identifier() -> u16 {
+    let sequence = NEXT_RAW_IDENTIFIER.fetch_add(1, Ordering::Relaxed);
+    (std::process::id() as u16).wrapping_add(sequence).max(1)
 }
 
 enum ParsedReply {
@@ -324,7 +349,9 @@ fn parse_icmp_reply(
         ));
     }
 
-    if is_icmp_error_type(icmp_type, is_ipv6) {
+    if is_icmp_error_type(icmp_type, is_ipv6)
+        && icmp_error_matches_request(icmp_data, is_ipv6, expected_identifier, expected_sequence)
+    {
         let outcome = classify_icmp_error(icmp_type, is_ipv6);
         return ParsedReply::Error(
             outcome,
@@ -333,6 +360,38 @@ fn parse_icmp_reply(
     }
 
     ParsedReply::Retry
+}
+
+fn icmp_error_matches_request(
+    icmp_data: &[u8],
+    is_ipv6: bool,
+    expected_identifier: u16,
+    expected_sequence: u16,
+) -> bool {
+    let inner_icmp_offset = if is_ipv6 {
+        8 + 40
+    } else {
+        if icmp_data.len() < 8 + 20 {
+            return false;
+        }
+        let inner_ip_header_len = ((icmp_data[8] & 0x0f) as usize) * 4;
+        if inner_ip_header_len < 20 {
+            return false;
+        }
+        8 + inner_ip_header_len
+    };
+    if icmp_data.len() < inner_icmp_offset + 8 {
+        return false;
+    }
+    let identifier = u16::from_be_bytes([
+        icmp_data[inner_icmp_offset + 4],
+        icmp_data[inner_icmp_offset + 5],
+    ]);
+    let sequence = u16::from_be_bytes([
+        icmp_data[inner_icmp_offset + 6],
+        icmp_data[inner_icmp_offset + 7],
+    ]);
+    identifier == expected_identifier && sequence == expected_sequence
 }
 
 fn is_icmp_error_type(icmp_type: u8, is_ipv6: bool) -> bool {
@@ -468,8 +527,7 @@ impl Probe for IcmpProbe {
         };
         let effective = Self::new(effective_config);
         let (target_ip, is_ipv6) = effective.resolve_host(&check.address).await?;
-        let (socket, method) = effective.create_socket(is_ipv6)?;
-        let identifier = std::process::id() as u16;
+        let (socket, method, identifier) = effective.create_socket(is_ipv6)?;
 
         let sample_count = check.sample_count.max(1);
         let timeout_per_sample = check.timeout / sample_count;
@@ -616,6 +674,10 @@ mod tests {
     #[test]
     fn parse_dest_unreachable_ipv4() {
         let mut reply = vec![ICMP_DEST_UNREACH_V4, 0, 0, 0, 0, 0, 0, 0];
+        let mut ip_header = vec![0u8; 20];
+        ip_header[0] = 0x45;
+        reply.extend(ip_header);
+        reply.extend(build_echo_request(false, 0x1111, 1, 0));
         let checksum = compute_checksum(&reply);
         reply[2..4].copy_from_slice(&checksum.to_be_bytes());
 
@@ -631,6 +693,10 @@ mod tests {
     #[test]
     fn parse_time_exceeded_ipv6() {
         let mut reply = vec![ICMP_TIME_EXCEEDED_V6, 0, 0, 0, 0, 0, 0, 0];
+        let mut ip_header = vec![0u8; 40];
+        ip_header[0] = 0x60;
+        reply.extend(ip_header);
+        reply.extend(build_echo_request(true, 0x1111, 1, 0));
         let checksum = compute_checksum(&reply);
         reply[2..4].copy_from_slice(&checksum.to_be_bytes());
 
@@ -641,6 +707,18 @@ mod tests {
             }
             _ => panic!("expected error reply"),
         }
+    }
+
+    #[test]
+    fn parse_unrelated_icmp_error_retries() {
+        let mut reply = vec![ICMP_DEST_UNREACH_V4, 0, 0, 0, 0, 0, 0, 0];
+        let mut ip_header = vec![0u8; 20];
+        ip_header[0] = 0x45;
+        reply.extend(ip_header);
+        reply.extend(build_echo_request(false, 0x2222, 1, 0));
+
+        let result = parse_icmp_reply(&reply, false, SocketMethod::Dgram, 0x1111, 1);
+        assert!(matches!(result, ParsedReply::Retry));
     }
 
     #[test]

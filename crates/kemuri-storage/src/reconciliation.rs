@@ -212,6 +212,49 @@ pub async fn reconcile_with_event(
     .execute(&mut *transaction)
     .await?;
 
+    let configured_rules: HashSet<&str> =
+        config.rules.iter().map(|rule| rule.id.as_str()).collect();
+    let alert_states: Vec<(i64, String, i64, i64, String, Option<bool>)> = sqlx::query_as(
+        "SELECT a.internal_id, a.rule_id, a.check_internal_id,
+                a.observer_internal_id, a.state, c.active
+         FROM alert_states a
+         LEFT JOIN checks c ON c.internal_id = a.check_internal_id
+         WHERE a.state IN ('firing', 'pending_fire', 'pending_clear')",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    let now: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
+        .fetch_one(&mut *transaction)
+        .await?;
+    for (internal_id, rule_id, check_id, alert_observer_id, state, check_active) in alert_states {
+        if check_active == Some(true) && configured_rules.contains(rule_id.as_str()) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO alert_events
+             (rule_id, check_internal_id, observer_internal_id, event_type,
+              from_state, to_state, occurred_at, reason)
+             VALUES (?, ?, ?, 'resolved', ?, 'normal', ?, 'config_removed')",
+        )
+        .bind(&rule_id)
+        .bind(check_id)
+        .bind(alert_observer_id)
+        .bind(&state)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE alert_states SET state = 'normal', state_entered_at = ?,
+             first_condition_true_at = NULL, last_evaluated_at = ?
+             WHERE internal_id = ?",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(internal_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
     sqlx::query(
         "INSERT INTO config_events (generation_hash, event_type, summary) VALUES (?, ?, ?)",
     )
@@ -396,5 +439,79 @@ targets:
             .unwrap();
         assert_eq!(probe_type, "icmp");
         assert_eq!(event_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_resolves_alert_for_removed_check_in_same_transaction() {
+        let pool = setup_pool().await;
+        let config: KemuriConfig = serde_yaml::from_str(
+            r#"
+version: 1
+profiles:
+  - kind: icmp
+    id: p1
+targets:
+  - id: t1
+    address: 127.0.0.1
+    checks:
+      - id: c1
+        profile: p1
+"#,
+        )
+        .unwrap();
+        reconcile(&pool, &config).await.unwrap();
+        let check_id: i64 =
+            sqlx::query_scalar("SELECT internal_id FROM checks WHERE check_id = 'c1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let observer_id: i64 =
+            sqlx::query_scalar("SELECT internal_id FROM observers WHERE observer_id = 'local'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO alert_states
+             (rule_id, check_internal_id, observer_internal_id, state)
+             VALUES ('removed-rule', ?, ?, 'firing')",
+        )
+        .bind(check_id)
+        .bind(observer_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let disabled: KemuriConfig = serde_yaml::from_str(
+            r#"
+version: 1
+profiles:
+  - kind: icmp
+    id: p1
+targets:
+  - id: t1
+    address: 127.0.0.1
+    checks:
+      - id: c1
+        profile: p1
+        enabled: false
+"#,
+        )
+        .unwrap();
+        reconcile_with_event(&pool, &disabled, "reload")
+            .await
+            .unwrap();
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM alert_states WHERE rule_id = 'removed-rule'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let reason: String =
+            sqlx::query_scalar("SELECT reason FROM alert_events WHERE rule_id = 'removed-rule'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "normal");
+        assert_eq!(reason, "config_removed");
     }
 }

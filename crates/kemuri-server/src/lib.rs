@@ -7,7 +7,6 @@ mod probe_registry;
 mod retention_worker;
 mod rollup_worker;
 mod scheduler;
-mod supervisor;
 mod worker;
 mod writer;
 
@@ -52,7 +51,6 @@ pub use notification::NotificationWorker;
 pub use notifiers::{NotificationPayload, Notifier, SmtpNotifier, WebhookNotifier};
 pub use probe_registry::ProbeRegistry;
 pub use scheduler::Scheduler;
-pub use supervisor::Supervisor;
 pub use worker::{RoundJob, WorkerPool};
 pub use writer::{RoundResult, StorageWriter};
 
@@ -203,7 +201,7 @@ pub async fn serve(
     )
     .with_event_channel(event_tx.clone());
     let fatal_alert = fatal_tx.clone();
-    let _alert_handle = tokio::spawn(async move {
+    let mut alert_handle = tokio::spawn(async move {
         alert_evaluator.run(alert_rx).await;
         let _ = fatal_alert.send("alert_evaluator").await;
     });
@@ -222,7 +220,7 @@ pub async fn serve(
     );
     let notification_shutdown = worker_shutdown_tx.subscribe();
     let fatal_notification = fatal_tx.clone();
-    let _notification_handle = tokio::spawn(async move {
+    let mut notification_handle = tokio::spawn(async move {
         notification_worker.run(notification_shutdown).await;
         let _ = fatal_notification.send("notification_worker").await;
     });
@@ -236,7 +234,7 @@ pub async fn serve(
     .with_event_channel(event_tx.clone());
     let mut no_data_shutdown = worker_shutdown_tx.subscribe();
     let fatal_no_data = fatal_tx.clone();
-    let _no_data_handle = tokio::spawn(async move {
+    let mut no_data_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tokio::select! {
@@ -255,7 +253,7 @@ pub async fn serve(
     let rollup_shutdown = worker_shutdown_tx.subscribe();
     let rollup_worker = rollup_worker::RollupWorker::new(Arc::new(rollup_pool));
     let fatal_rollup = fatal_tx.clone();
-    let _rollup_handle = tokio::spawn(async move {
+    let mut rollup_handle = tokio::spawn(async move {
         rollup_worker.run(rollup_shutdown).await;
         let _ = fatal_rollup.send("rollup_worker").await;
     });
@@ -266,7 +264,7 @@ pub async fn serve(
     let retention_worker =
         retention_worker::RetentionWorker::new(Arc::new(retention_pool), retention_config);
     let fatal_retention = fatal_tx.clone();
-    let _retention_handle = tokio::spawn(async move {
+    let mut retention_handle = tokio::spawn(async move {
         retention_worker.run(retention_shutdown).await;
         let _ = fatal_retention.send("retention_worker").await;
     });
@@ -277,7 +275,7 @@ pub async fn serve(
     let disk_config = shared_config.clone();
     let disk_scheduler = scheduler_inst.command_sender();
     let disk_ready_worker = disk_ready.clone();
-    let _disk_handle = tokio::spawn(async move {
+    let mut disk_handle = tokio::spawn(async move {
         let mut paused = false;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -459,6 +457,12 @@ pub async fn serve(
             let _ = worker.await;
         }
         let _ = (&mut writer_handle).await;
+        let _ = (&mut alert_handle).await;
+        let _ = (&mut notification_handle).await;
+        let _ = (&mut no_data_handle).await;
+        let _ = (&mut rollup_handle).await;
+        let _ = (&mut retention_handle).await;
+        let _ = (&mut disk_handle).await;
         server_result
     };
     match tokio::time::timeout(shutdown_timeout, graceful).await {
@@ -472,6 +476,12 @@ pub async fn serve(
                 worker.abort();
             }
             writer_handle.abort();
+            alert_handle.abort();
+            notification_handle.abort();
+            no_data_handle.abort();
+            rollup_handle.abort();
+            retention_handle.abort();
+            disk_handle.abort();
         }
     }
 
@@ -557,11 +567,6 @@ async fn perform_reload(
         *last_reload.write().unwrap() = Some(status);
         return;
     }
-    if let Err(error) = resolve_removed_alerts(pool, &new_config).await {
-        tracing::error!(%error, "config reload failed: alert reconciliation error");
-        return;
-    }
-
     scheduler.reconcile(new_resolved.checks.clone()).await;
     let icmp_available = check_icmp_capability().is_available();
     probe_ready.store(
@@ -615,66 +620,6 @@ fn build_notifiers(
         }
     }
     Ok(notifiers)
-}
-
-async fn resolve_removed_alerts(
-    pool: &sqlx::SqlitePool,
-    config: &KemuriConfig,
-) -> Result<(), sqlx::Error> {
-    let configured_rules: std::collections::HashSet<&str> =
-        config.rules.iter().map(|rule| rule.id.as_str()).collect();
-    let rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
-        "SELECT a.internal_id, a.rule_id, a.check_internal_id,
-                a.observer_internal_id, a.state
-         FROM alert_states a
-         LEFT JOIN checks c ON c.internal_id = a.check_internal_id
-         WHERE a.state IN ('firing', 'pending_fire', 'pending_clear')
-           AND (c.active = 0 OR c.internal_id IS NULL)",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut candidates = rows;
-    let rule_rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
-        "SELECT internal_id, rule_id, check_internal_id, observer_internal_id, state
-         FROM alert_states
-         WHERE state IN ('firing', 'pending_fire', 'pending_clear')",
-    )
-    .fetch_all(pool)
-    .await?;
-    for row in rule_rows {
-        if !configured_rules.contains(row.1.as_str())
-            && !candidates.iter().any(|candidate| candidate.0 == row.0)
-        {
-            candidates.push(row);
-        }
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    for (internal_id, rule_id, check_id, observer_id, state) in candidates {
-        sqlx::query(
-            "INSERT INTO alert_events
-             (rule_id, check_internal_id, observer_internal_id, event_type,
-              from_state, to_state, occurred_at, reason)
-             VALUES (?, ?, ?, 'resolved', ?, 'normal', ?, 'config_removed')",
-        )
-        .bind(&rule_id)
-        .bind(check_id)
-        .bind(observer_id)
-        .bind(&state)
-        .bind(&now)
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "UPDATE alert_states SET state = 'normal', state_entered_at = ?,
-             first_condition_true_at = NULL, last_evaluated_at = ?
-             WHERE internal_id = ?",
-        )
-        .bind(&now)
-        .bind(&now)
-        .bind(internal_id)
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
 }
 
 async fn ensure_observer(pool: &sqlx::SqlitePool) -> Result<i64, ServerError> {

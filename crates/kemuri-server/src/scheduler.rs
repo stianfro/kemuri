@@ -318,7 +318,9 @@ impl Scheduler {
                 let queue_depth = queue.max_capacity() - queue.capacity();
                 metrics::gauge!("kemuri_scheduler_queue_depth").set(queue_depth as f64);
             }
-            if let Some(sender) = fatal_tx {
+            if !*shutdown_rx.borrow()
+                && let Some(sender) = fatal_tx
+            {
                 let _ = sender.try_send("scheduler");
             }
         });
@@ -331,7 +333,6 @@ impl Scheduler {
             let _ = tx.send(true);
         }
         if let Some(handle) = self.handle.take() {
-            handle.abort();
             let _ = handle.await;
         }
         let (replacement, receiver) = mpsc::channel(1);

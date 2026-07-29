@@ -1,0 +1,1674 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kemuri API",
+    "description": "",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/alert-events": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "list_alert_events",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertEventsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "list_alerts",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertsListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/{alert_id}": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_alert",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "description": "Alert state identifier",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertStateResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/reload": {
+      "post": {
+        "tags": [],
+        "operationId": "reload_config",
+        "responses": {
+          "202": {
+            "description": "Reload accepted"
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [],
+        "operationId": "events_handler",
+        "responses": {
+          "200": {
+            "description": "Server-sent event stream"
+          }
+        }
+      }
+    },
+    "/api/v1/groups": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "list_groups",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/groups/{group_path}": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_group",
+        "parameters": [
+          {
+            "name": "group_path",
+            "in": "path",
+            "description": "Nested group path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/info": {
+      "get": {
+        "tags": [],
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "description": "Build information"
+          }
+        }
+      }
+    },
+    "/api/v1/system/status": {
+      "get": {
+        "tags": [],
+        "operationId": "system_status",
+        "responses": {
+          "200": {
+            "description": "Runtime and dependency status"
+          }
+        }
+      }
+    },
+    "/api/v1/targets": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "list_targets",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{target_id}": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_target",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Target identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{target_id}/checks": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "list_checks",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Target identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChecksResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{target_id}/checks/{check_id}": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_check",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Target identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check_id",
+            "in": "path",
+            "description": "Check identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{target_id}/checks/{check_id}/rounds": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_rounds",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Target identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check_id",
+            "in": "path",
+            "description": "Check identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoundsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{target_id}/checks/{check_id}/series": {
+      "get": {
+        "tags": [
+          "api"
+        ],
+        "operationId": "get_series",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Target identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check_id",
+            "in": "path",
+            "description": "Check identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "max_points",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AlertEventResponse": {
+        "type": "object",
+        "required": [
+          "internal_id",
+          "rule_id",
+          "target_id",
+          "check_id",
+          "event_type",
+          "from_state",
+          "to_state",
+          "occurred_at",
+          "timestamp_ms"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "from_state": {
+            "type": "string"
+          },
+          "internal_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "metric_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "occurred_at": {
+            "type": "string"
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "threshold_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to_state": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertEventsResponse": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertEventResponse"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AlertStateResponse": {
+        "type": "object",
+        "required": [
+          "internal_id",
+          "rule_id",
+          "target_id",
+          "check_id",
+          "state",
+          "state_entered_at"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "first_condition_true_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "internal_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_evaluated_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_metric_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "last_notification_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_entered_at": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertsListResponse": {
+        "type": "object",
+        "required": [
+          "alerts"
+        ],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertStateResponse"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckDetail": {
+        "type": "object",
+        "required": [
+          "check_id",
+          "target_id",
+          "probe_type",
+          "state",
+          "observer_id"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "health_failure_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "last_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "last_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_round_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_round_timestamp_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "measurement_loss_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "observer_id": {
+            "type": "string"
+          },
+          "probe_type": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckSummary": {
+        "type": "object",
+        "required": [
+          "check_id",
+          "probe_type",
+          "state"
+        ],
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "last_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "last_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "measurement_loss_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "probe_type": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "ChecksResponse": {
+        "type": "object",
+        "required": [
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckSummary"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GroupResponse": {
+        "type": "object",
+        "required": [
+          "group_path",
+          "targets"
+        ],
+        "properties": {
+          "group_path": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetSummary"
+            }
+          }
+        }
+      },
+      "GroupsResponse": {
+        "type": "object",
+        "required": [
+          "groups"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupResponse"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RoundSummary": {
+        "type": "object",
+        "required": [
+          "scheduled_at",
+          "timestamp_ms",
+          "execution_status",
+          "attempted_samples",
+          "healthy_samples",
+          "unhealthy_samples",
+          "measurement_loss_samples",
+          "samples"
+        ],
+        "properties": {
+          "attempted_samples": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "healthy_samples": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "max_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "max_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "measurement_loss_samples": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "min_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "min_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outcome_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SampleDetail"
+            }
+          },
+          "scheduled_at": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unhealthy_samples": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "RoundsResponse": {
+        "type": "object",
+        "required": [
+          "rounds"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rounds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoundSummary"
+            }
+          }
+        }
+      },
+      "SampleDetail": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "metadata": {},
+          "outcome": {
+            "type": "string"
+          }
+        }
+      },
+      "SeriesAlertEvent": {
+        "type": "object",
+        "required": [
+          "timestamp_ms",
+          "event_type",
+          "rule_id"
+        ],
+        "properties": {
+          "event_type": {
+            "type": "string"
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SeriesPoint": {
+        "type": "object",
+        "required": [
+          "timestamp",
+          "timestamp_ms",
+          "bucket_status",
+          "rounds_count",
+          "attempted",
+          "latency_bearing",
+          "healthy",
+          "unhealthy",
+          "measurement_lost",
+          "measurement_loss_ratio",
+          "health_failure_ratio",
+          "histogram_bins"
+        ],
+        "properties": {
+          "attempted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "bucket_status": {
+            "type": "string"
+          },
+          "health_failure_ratio": {
+            "type": "number",
+            "format": "double"
+          },
+          "healthy": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "histogram_bins": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          "latency_bearing": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "max_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "max_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "measurement_loss_ratio": {
+            "type": "number",
+            "format": "double"
+          },
+          "measurement_lost": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "min_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "min_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p50_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p50_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p95_latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p95_latency_us": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "rounds_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unhealthy": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SeriesResponse": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "check_id",
+          "observer_id",
+          "from",
+          "to",
+          "from_ms",
+          "to_ms",
+          "resolution_ms",
+          "source",
+          "quantiles",
+          "histogram_bin_representatives_ms",
+          "points",
+          "alert_events",
+          "revision_markers"
+        ],
+        "properties": {
+          "alert_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeriesAlertEvent"
+            }
+          },
+          "check_id": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "from_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "histogram_bin_representatives_ms": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "observer_id": {
+            "type": "string"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeriesPoint"
+            }
+          },
+          "quantiles": {
+            "type": "string"
+          },
+          "resolution_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revision_markers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeriesRevisionMarker"
+            }
+          },
+          "source": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "to_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SeriesRevisionMarker": {
+        "type": "object",
+        "required": [
+          "timestamp_ms",
+          "revision_id"
+        ],
+        "properties": {
+          "revision_id": {
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "TargetDetail": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "name",
+          "group_path",
+          "labels",
+          "state",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckSummary"
+            }
+          },
+          "group_path": {
+            "type": "string"
+          },
+          "labels": {},
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TargetSummary": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "name",
+          "group_path",
+          "state",
+          "checks_count"
+        ],
+        "properties": {
+          "checks_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "group_path": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TargetsResponse": {
+        "type": "object",
+        "required": [
+          "targets",
+          "groups"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupResponse"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetSummary"
+            }
+          }
+        }
+      }
+    }
+  }
+}

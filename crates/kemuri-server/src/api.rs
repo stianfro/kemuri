@@ -4,10 +4,11 @@ use axum::http::StatusCode;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
@@ -70,7 +71,8 @@ fn internal_error(e: impl std::fmt::Display) -> ApiError {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AlertsQuery {
     pub state: Option<String>,
     pub rule_id: Option<String>,
@@ -80,7 +82,7 @@ pub struct AlertsQuery {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AlertStateResponse {
     pub internal_id: i64,
     pub rule_id: String,
@@ -94,12 +96,22 @@ pub struct AlertStateResponse {
     pub last_metric_value: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AlertsListResponse {
     pub alerts: Vec<AlertStateResponse>,
     pub next_cursor: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts",
+    params(AlertsQuery),
+    responses(
+        (status = 200, body = AlertsListResponse),
+        (status = 400, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn list_alerts(
     State(state): State<AppState>,
     Query(query): Query<AlertsQuery>,
@@ -180,6 +192,16 @@ pub async fn list_alerts(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts/{alert_id}",
+    params(("alert_id" = i64, Path, description = "Alert state identifier")),
+    responses(
+        (status = 200, body = AlertStateResponse),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_alert(
     State(state): State<AppState>,
     Path(alert_id): Path<i64>,
@@ -228,7 +250,8 @@ pub async fn get_alert(
     }))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AlertEventsQuery {
     pub rule_id: Option<String>,
     pub target_id: Option<String>,
@@ -239,7 +262,7 @@ pub struct AlertEventsQuery {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AlertEventResponse {
     pub internal_id: i64,
     pub rule_id: String,
@@ -254,12 +277,22 @@ pub struct AlertEventResponse {
     pub timestamp_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AlertEventsResponse {
     pub events: Vec<AlertEventResponse>,
     pub next_cursor: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/alert-events",
+    params(AlertEventsQuery),
+    responses(
+        (status = 200, body = AlertEventsResponse),
+        (status = 400, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn list_alert_events(
     State(state): State<AppState>,
     Query(query): Query<AlertEventsQuery>,
@@ -357,13 +390,13 @@ pub async fn list_alert_events(
     }))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct GroupResponse {
     pub group_path: String,
     pub targets: Vec<TargetSummary>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TargetSummary {
     pub target_id: String,
     pub name: String,
@@ -372,19 +405,30 @@ pub struct TargetSummary {
     pub checks_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TargetsResponse {
     pub targets: Vec<TargetSummary>,
     pub groups: Vec<GroupResponse>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PageQuery {
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets",
+    params(PageQuery),
+    responses(
+        (status = 200, body = TargetsResponse),
+        (status = 400, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn list_targets(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
@@ -487,7 +531,7 @@ fn state_rank(state: &str) -> u8 {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CheckSummary {
     pub check_id: String,
     pub probe_type: String,
@@ -497,7 +541,7 @@ pub struct CheckSummary {
     pub measurement_loss_ratio: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct TargetDetail {
     pub target_id: String,
     pub name: String,
@@ -507,6 +551,16 @@ pub struct TargetDetail {
     pub checks: Vec<CheckSummary>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets/{target_id}",
+    params(("target_id" = String, Path, description = "Target identifier")),
+    responses(
+        (status = 200, body = TargetDetail),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_target(
     State(state): State<AppState>,
     Path(target_id): Path<String>,
@@ -559,7 +613,7 @@ pub async fn get_target(
     }))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CheckDetail {
     pub check_id: String,
     pub target_id: String,
@@ -574,6 +628,20 @@ pub struct CheckDetail {
     pub observer_id: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets/{target_id}/checks",
+    params(
+        ("target_id" = String, Path, description = "Target identifier"),
+        PageQuery
+    ),
+    responses(
+        (status = 200, body = ChecksResponse),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn list_checks(
     State(state): State<AppState>,
     Path(target_id): Path<String>,
@@ -626,12 +694,25 @@ pub async fn list_checks(
     }))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ChecksResponse {
     pub checks: Vec<CheckSummary>,
     pub next_cursor: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets/{target_id}/checks/{check_id}",
+    params(
+        ("target_id" = String, Path, description = "Target identifier"),
+        ("check_id" = String, Path, description = "Check identifier")
+    ),
+    responses(
+        (status = 200, body = CheckDetail),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_check(
     State(state): State<AppState>,
     Path((target_id, check_id)): Path<(String, String)>,
@@ -669,7 +750,8 @@ pub async fn get_check(
     }))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SeriesQuery {
     pub from_ms: Option<i64>,
     pub to_ms: Option<i64>,
@@ -678,7 +760,7 @@ pub struct SeriesQuery {
     pub max_points: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SeriesPoint {
     pub timestamp: String,
     pub timestamp_ms: i64,
@@ -702,7 +784,7 @@ pub struct SeriesPoint {
     pub histogram_bins: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SeriesResponse {
     pub target_id: String,
     pub check_id: String,
@@ -720,19 +802,34 @@ pub struct SeriesResponse {
     pub revision_markers: Vec<SeriesRevisionMarker>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SeriesAlertEvent {
     pub timestamp_ms: i64,
     pub event_type: String,
     pub rule_id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SeriesRevisionMarker {
     pub timestamp_ms: i64,
     pub revision_id: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets/{target_id}/checks/{check_id}/series",
+    params(
+        ("target_id" = String, Path, description = "Target identifier"),
+        ("check_id" = String, Path, description = "Check identifier"),
+        SeriesQuery
+    ),
+    responses(
+        (status = 200, body = SeriesResponse),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_series(
     State(state): State<AppState>,
     Path((target_id, check_id)): Path<(String, String)>,
@@ -1258,13 +1355,14 @@ fn percentile(sorted: &[i64], p: u32) -> Option<i64> {
     Some(sorted[idx.min(sorted.len() - 1)])
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RoundsQuery {
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SampleDetail {
     pub outcome: String,
     pub latency_ms: Option<f64>,
@@ -1272,7 +1370,7 @@ pub struct SampleDetail {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RoundSummary {
     pub scheduled_at: String,
     pub timestamp_ms: i64,
@@ -1290,12 +1388,27 @@ pub struct RoundSummary {
     pub samples: Vec<SampleDetail>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RoundsResponse {
     pub rounds: Vec<RoundSummary>,
     pub next_cursor: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/targets/{target_id}/checks/{check_id}/rounds",
+    params(
+        ("target_id" = String, Path, description = "Target identifier"),
+        ("check_id" = String, Path, description = "Check identifier"),
+        RoundsQuery
+    ),
+    responses(
+        (status = 200, body = RoundsResponse),
+        (status = 400, body = ApiError),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_rounds(
     State(state): State<AppState>,
     Path((target_id, check_id)): Path<(String, String)>,
@@ -1460,6 +1573,16 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
         .collect()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/groups",
+    params(PageQuery),
+    responses(
+        (status = 200, body = GroupsResponse),
+        (status = 400, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn list_groups(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
@@ -1496,6 +1619,16 @@ pub async fn list_groups(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/groups/{group_path}",
+    params(("group_path" = String, Path, description = "Nested group path")),
+    responses(
+        (status = 200, body = GroupResponse),
+        (status = 404, body = ApiError),
+        (status = 500, body = ApiError)
+    )
+)]
 pub async fn get_group(
     State(state): State<AppState>,
     Path(group_path): Path<String>,
@@ -1518,7 +1651,7 @@ pub async fn get_group(
         .ok_or_else(|| not_found("group_not_found", "The requested group does not exist"))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct GroupsResponse {
     pub groups: Vec<GroupResponse>,
     pub next_cursor: Option<String>,

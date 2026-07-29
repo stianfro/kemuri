@@ -22,8 +22,16 @@ check:
 run *args:
     cargo run -- {{args}}
 
-web-build:
-    cd web && npm ci && npm run build
+api-generate:
+    mkdir -p openapi web/src/generated
+    cargo run --quiet -p kemuri-server --example export_openapi > openapi/openapi.json
+    cd web && npm ci && npm run generate-api
+
+api-check: api-generate
+    git diff --exit-code -- openapi/openapi.json web/src/generated/api.ts
+
+web-build: api-generate
+    cd web && npm run build
     git diff --exit-code -- web/dist
 
 web-dev:
@@ -31,6 +39,7 @@ web-dev:
 
 test-api:
     cargo test -p kemuri-server
+    just api-check
 
 test-web:
     cd web && npm ci && npm run build

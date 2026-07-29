@@ -39,6 +39,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
 use rust_embed::RustEmbed;
 use tokio::sync::mpsc;
+use utoipa::OpenApi;
 
 pub use alerts::AlertEvaluator;
 pub use api::{
@@ -763,10 +764,20 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
     state.prometheus_handle.render()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/info",
+    responses((status = 200, description = "Build information"))
+)]
 async fn info(State(state): State<AppState>) -> Json<BuildInfo> {
     Json(state.build_info.as_ref().clone())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/system/status",
+    responses((status = 200, description = "Runtime and dependency status"))
+)]
 async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let uptime = state.started_at.elapsed().as_secs();
     let config = state.config.read().unwrap().clone();
@@ -823,6 +834,11 @@ async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/events",
+    responses((status = 200, description = "Server-sent event stream"))
+)]
 async fn events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
@@ -852,6 +868,14 @@ async fn events_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/config/reload",
+    responses(
+        (status = 202, description = "Reload accepted"),
+        (status = 400, body = api::ApiError)
+    )
+)]
 async fn reload_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -891,27 +915,57 @@ async fn api_not_found() -> impl IntoResponse {
     api::not_found_public("route_not_found", "The requested API route does not exist")
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "Kemuri API", version = env!("CARGO_PKG_VERSION")),
+    paths(
+        info,
+        system_status,
+        events_handler,
+        reload_config,
+        api::list_groups,
+        api::get_group,
+        api::list_targets,
+        api::get_target,
+        api::list_checks,
+        api::get_check,
+        api::get_series,
+        api::get_rounds,
+        api::list_alerts,
+        api::get_alert,
+        api::list_alert_events
+    ),
+    components(schemas(
+        api::ApiError,
+        api::AlertStateResponse,
+        api::AlertsListResponse,
+        api::AlertEventResponse,
+        api::AlertEventsResponse,
+        api::GroupResponse,
+        api::GroupsResponse,
+        api::TargetSummary,
+        api::TargetsResponse,
+        api::CheckSummary,
+        api::ChecksResponse,
+        api::TargetDetail,
+        api::CheckDetail,
+        api::SeriesPoint,
+        api::SeriesResponse,
+        api::SeriesAlertEvent,
+        api::SeriesRevisionMarker,
+        api::SampleDetail,
+        api::RoundSummary,
+        api::RoundsResponse
+    ))
+)]
+pub struct ApiDoc;
+
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
+
 async fn openapi() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "openapi": "3.1.0",
-        "info": {"title": "Kemuri API", "version": env!("CARGO_PKG_VERSION")},
-        "paths": {
-            "/api/v1/info": {"get": {"responses": {"200": {"description": "Build information"}}}},
-            "/api/v1/system/status": {"get": {"responses": {"200": {"description": "System status"}}}},
-            "/api/v1/events": {"get": {"responses": {"200": {"description": "Event stream"}}}},
-            "/api/v1/groups": {"get": {"responses": {"200": {"description": "Groups"}}}},
-            "/api/v1/targets": {"get": {"responses": {"200": {"description": "Targets"}}}},
-            "/api/v1/targets/{target_id}": {"get": {"responses": {"200": {"description": "Target"}}}},
-            "/api/v1/targets/{target_id}/checks": {"get": {"responses": {"200": {"description": "Checks"}}}},
-            "/api/v1/targets/{target_id}/checks/{check_id}": {"get": {"responses": {"200": {"description": "Check"}}}},
-            "/api/v1/targets/{target_id}/checks/{check_id}/series": {"get": {"responses": {"200": {"description": "Series"}}}},
-            "/api/v1/targets/{target_id}/checks/{check_id}/rounds": {"get": {"responses": {"200": {"description": "Rounds"}}}},
-            "/api/v1/alerts": {"get": {"responses": {"200": {"description": "Alerts"}}}},
-            "/api/v1/alerts/{alert_id}": {"get": {"responses": {"200": {"description": "Alert"}}}},
-            "/api/v1/alert-events": {"get": {"responses": {"200": {"description": "Alert events"}}}},
-            "/api/v1/config/reload": {"post": {"responses": {"202": {"description": "Reload queued"}}}}
-        }
-    }))
+    Json(serde_json::to_value(openapi_document()).expect("OpenAPI document must serialize"))
 }
 
 #[derive(RustEmbed)]
@@ -945,4 +999,38 @@ fn asset_response(path: &str, data: std::borrow::Cow<'static, [u8]>) -> Response
         .header(header::CONTENT_TYPE, content_type.as_ref())
         .body(Body::from(data.into_owned()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use std::collections::BTreeSet;
+
+    use super::openapi_document;
+
+    #[test]
+    fn document_matches_api_router_paths() {
+        let document = openapi_document();
+        let actual: BTreeSet<&str> = document.paths.paths.keys().map(String::as_str).collect();
+        let expected: BTreeSet<&str> = [
+            "/api/v1/alert-events",
+            "/api/v1/alerts",
+            "/api/v1/alerts/{alert_id}",
+            "/api/v1/config/reload",
+            "/api/v1/events",
+            "/api/v1/groups",
+            "/api/v1/groups/{group_path}",
+            "/api/v1/info",
+            "/api/v1/system/status",
+            "/api/v1/targets",
+            "/api/v1/targets/{target_id}",
+            "/api/v1/targets/{target_id}/checks",
+            "/api/v1/targets/{target_id}/checks/{check_id}",
+            "/api/v1/targets/{target_id}/checks/{check_id}/rounds",
+            "/api/v1/targets/{target_id}/checks/{check_id}/series",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(document.info.version, env!("CARGO_PKG_VERSION"));
+    }
 }

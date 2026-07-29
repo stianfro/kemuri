@@ -51,7 +51,7 @@ test-usage:
     bash packaging/tests/usage.sh
 
 test-container:
-    docker build -f packaging/container/Dockerfile -t kemuri:test .
+    bash packaging/tests/container.sh
 
 test-load:
     cargo test -p kemuri-server --test load

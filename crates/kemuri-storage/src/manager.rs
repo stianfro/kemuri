@@ -48,7 +48,7 @@ impl StorageManager {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
-            .acquire_timeout(Duration::from_secs(5))
+            .acquire_timeout(Duration::from_secs(30))
             .connect_with(options)
             .await?;
 

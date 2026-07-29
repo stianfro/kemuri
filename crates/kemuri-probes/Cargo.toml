@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 kemuri-core = { workspace = true }
+kemuri-config = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

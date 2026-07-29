@@ -25,7 +25,7 @@ fn make_resolved_check(check_id: &str, target_id: &str) -> ResolvedCheck {
         probe_kind: ProbeKind::Http,
         timeout: Duration::from_secs(5),
         sample_count: 1,
-        params: HashMap::new(),
+        settings: kemuri_probes::ProbeSettings::Defaults,
     }
 }
 

@@ -53,7 +53,6 @@ pub use notifiers::{NotificationPayload, Notifier, SmtpNotifier, WebhookNotifier
 pub use probe_registry::ProbeRegistry;
 pub use scheduler::Scheduler;
 pub use supervisor::Supervisor;
-pub use worker::probe_params as worker_probe_params;
 pub use worker::{RoundJob, WorkerPool};
 pub use writer::{RoundResult, StorageWriter};
 

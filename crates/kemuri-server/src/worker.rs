@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -130,8 +129,6 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
         _ => 1,
     };
 
-    let params = probe_params(&job.check.probe_params);
-
     let resolved_check = ResolvedCheck {
         check_id: job.check.check_id.clone(),
         target_id: job.check.target_id.clone(),
@@ -140,7 +137,7 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
         probe_kind: job.check.probe_kind,
         timeout: job.check.timeout,
         sample_count,
-        params,
+        settings: job.check.probe_params.clone().into(),
     };
 
     let round_result = match tokio::time::timeout(
@@ -235,85 +232,4 @@ fn classify_execution_status(results: &[SampleResult]) -> kemuri_core::RoundExec
     } else {
         kemuri_core::RoundExecutionStatus::Complete
     }
-}
-
-pub fn probe_params(params: &ResolvedProbeParams) -> HashMap<String, String> {
-    let mut values = HashMap::new();
-    match params {
-        ResolvedProbeParams::Icmp(params) => {
-            values.insert("address_family".to_owned(), params.address_family.clone());
-            values.insert("payload_size".to_owned(), params.payload_size.to_string());
-            if let Some(source_address) = &params.source_address {
-                values.insert("source_address".to_owned(), source_address.clone());
-            }
-        }
-        ResolvedProbeParams::Http(params) => {
-            values.insert("url".to_owned(), params.url.clone());
-            if let Some(method) = &params.method {
-                values.insert("method".to_owned(), method.clone());
-            }
-            if let Some(status) = params.expected_status {
-                values.insert("expected_status".to_owned(), status.to_string());
-            }
-            if let Some((start, end)) = params.expected_status_range {
-                values.insert("expected_status_range".to_owned(), format!("{start}-{end}"));
-            }
-            if let Some(body) = &params.body {
-                values.insert("body".to_owned(), body.clone());
-            }
-            values.insert(
-                "follow_redirects".to_owned(),
-                params.follow_redirects.to_string(),
-            );
-            values.insert(
-                "max_redirect_count".to_owned(),
-                params.max_redirect_count.to_string(),
-            );
-            values.insert("connection_mode".to_owned(), params.connection_mode.clone());
-            values.insert("measure_until".to_owned(), params.measure_until.clone());
-            values.insert("tls_validate".to_owned(), params.tls_validate.to_string());
-            if let Some(user_agent) = &params.user_agent {
-                values.insert("user_agent".to_owned(), user_agent.clone());
-            }
-            if !params.root_certificates.is_empty()
-                && let Ok(certificates) = serde_json::to_string(&params.root_certificates)
-            {
-                values.insert("root_certificates".to_owned(), certificates);
-            }
-            if !params.headers.is_empty()
-                && let Ok(headers) = serde_json::to_string(&params.headers)
-            {
-                values.insert("headers".to_owned(), headers);
-            }
-        }
-        ResolvedProbeParams::Tcp(params) => {
-            values.insert("host".to_owned(), params.host.clone());
-            values.insert("port".to_owned(), params.port.to_string());
-            values.insert("address_family".to_owned(), params.address_family.clone());
-            if let Some(source_address) = &params.source_address {
-                values.insert("source_address".to_owned(), source_address.clone());
-            }
-            if let Some(tls) = &params.tls
-                && let Ok(tls) = serde_json::to_string(tls)
-            {
-                values.insert("tls".to_owned(), tls);
-            }
-        }
-        ResolvedProbeParams::Dns(params) => {
-            values.insert("name".to_owned(), params.domain.clone());
-            if let Some(record_type) = &params.record_type {
-                values.insert("record_type".to_owned(), record_type.clone());
-            }
-            if let Some(server) = &params.resolver {
-                values.insert("server".to_owned(), server.clone());
-            }
-            values.insert("protocol".to_owned(), params.protocol.clone());
-            values.insert("expected_rcode".to_owned(), params.expected_rcode.clone());
-            values.insert(
-                "require_answer".to_owned(),
-                params.require_answer.to_string(),
-            );
-        }
-    }
-    values
 }

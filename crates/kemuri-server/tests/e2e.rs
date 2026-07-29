@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kemuri_config::{CheckConfig, KemuriConfig, TargetConfig};
+use kemuri_config::{
+    CheckConfig, KemuriConfig, ResolvedDnsParams, ResolvedTcpParams, TargetConfig,
+};
 use kemuri_core::{CheckId, ProbeKind, ProfileId, SampleOutcome, TargetId};
 use kemuri_probes::{
     DnsProbe, DnsProbeConfig, ResolvedCheck, RoundContext, SyntheticProbe, TcpProbe, TcpProbeConfig,
@@ -23,7 +25,7 @@ fn make_resolved_check(
     target_id: &str,
     address: &str,
     probe_kind: ProbeKind,
-    params: HashMap<String, String>,
+    settings: kemuri_probes::ProbeSettings,
 ) -> ResolvedCheck {
     ResolvedCheck {
         check_id: CheckId::new(check_id).unwrap(),
@@ -33,7 +35,7 @@ fn make_resolved_check(
         probe_kind,
         timeout: Duration::from_secs(5),
         sample_count: 1,
-        params,
+        settings,
     }
 }
 
@@ -148,7 +150,7 @@ async fn e2e_synthetic_probe_pipeline() {
         "web-1",
         "127.0.0.1",
         ProbeKind::Http,
-        HashMap::new(),
+        kemuri_probes::ProbeSettings::Defaults,
     );
 
     let probe = registry.get(ProbeKind::Http).unwrap();
@@ -213,17 +215,19 @@ async fn e2e_tcp_probe_executes() {
     let mut registry = ProbeRegistry::new();
     registry.register(Arc::new(TcpProbe::new(TcpProbeConfig::default())));
 
-    let mut params = HashMap::new();
-    params.insert("host".to_owned(), "127.0.0.1".to_owned());
-    params.insert("port".to_owned(), port.to_string());
-
     let ctx = make_round_context();
     let check = make_resolved_check(
         "tcp-check",
         "tcp-target",
         "127.0.0.1",
         ProbeKind::Tcp,
-        params,
+        kemuri_probes::ProbeSettings::Tcp(ResolvedTcpParams {
+            host: "127.0.0.1".to_owned(),
+            port,
+            address_family: "auto".to_owned(),
+            source_address: None,
+            tls: None,
+        }),
     );
 
     let probe = registry.get(ProbeKind::Tcp).unwrap();
@@ -248,18 +252,20 @@ async fn e2e_dns_probe_executes() {
     let mut registry = ProbeRegistry::new();
     registry.register(Arc::new(DnsProbe::new(DnsProbeConfig::default())));
 
-    let mut params = HashMap::new();
-    params.insert("name".to_owned(), "example.com".to_owned());
-    params.insert("record_type".to_owned(), "A".to_owned());
-    params.insert("server".to_owned(), "1.1.1.1".to_owned());
-
     let ctx = make_round_context();
     let check = make_resolved_check(
         "dns-check",
         "dns-target",
         "example.com",
         ProbeKind::Dns,
-        params,
+        kemuri_probes::ProbeSettings::Dns(ResolvedDnsParams {
+            domain: "example.com".to_owned(),
+            record_type: Some("A".to_owned()),
+            resolver: Some("1.1.1.1".to_owned()),
+            protocol: "udp".to_owned(),
+            expected_rcode: "noerror".to_owned(),
+            require_answer: false,
+        }),
     );
 
     let probe = registry.get(ProbeKind::Dns).unwrap();

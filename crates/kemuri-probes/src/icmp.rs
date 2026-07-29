@@ -449,23 +449,24 @@ impl Probe for IcmpProbe {
         _context: RoundContext,
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
-        let effective = Self::new(IcmpProbeConfig {
-            address_family: match check.params.get("address_family").map(String::as_str) {
-                Some("ipv4") => AddressFamily::Ipv4,
-                Some("ipv6") => AddressFamily::Ipv6,
-                _ => AddressFamily::Auto,
+        let effective_config = match &check.settings {
+            crate::ProbeSettings::Icmp(settings) => IcmpProbeConfig {
+                address_family: match settings.address_family.as_str() {
+                    "ipv4" => AddressFamily::Ipv4,
+                    "ipv6" => AddressFamily::Ipv6,
+                    _ => AddressFamily::Auto,
+                },
+                payload_size: settings.payload_size,
+                source_address: settings.source_address.clone(),
             },
-            payload_size: check
-                .params
-                .get("payload_size")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(self.config.payload_size),
-            source_address: check
-                .params
-                .get("source_address")
-                .cloned()
-                .or_else(|| self.config.source_address.clone()),
-        });
+            crate::ProbeSettings::Defaults => self.config.clone(),
+            _ => {
+                return Err(ProbeExecutionError::Internal(
+                    "ICMP probe received settings for another probe type".to_owned(),
+                ));
+            }
+        };
+        let effective = Self::new(effective_config);
         let (target_ip, is_ipv6) = effective.resolve_host(&check.address).await?;
         let (socket, method) = effective.create_socket(is_ipv6)?;
         let identifier = std::process::id() as u16;

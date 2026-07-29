@@ -1,18 +1,12 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
+use kemuri_config::ResolvedDnsParams;
 use kemuri_core::{CheckId, ObserverId, ProbeKind, ProfileId, SampleOutcome, TargetId};
 use kemuri_probes::{
     DnsProbe, DnsProbeConfig, DnsProtocol, DnsResponseCode, Probe, ResolvedCheck, RoundContext,
 };
 
 fn make_dns_check(name: &str, record_type: &str, server: Option<&str>) -> ResolvedCheck {
-    let mut params = HashMap::new();
-    params.insert("name".to_owned(), name.to_owned());
-    params.insert("record_type".to_owned(), record_type.to_owned());
-    if let Some(srv) = server {
-        params.insert("server".to_owned(), srv.to_owned());
-    }
     ResolvedCheck {
         check_id: CheckId::new("test-dns").unwrap(),
         target_id: TargetId::new("test-target").unwrap(),
@@ -21,7 +15,14 @@ fn make_dns_check(name: &str, record_type: &str, server: Option<&str>) -> Resolv
         probe_kind: ProbeKind::Dns,
         timeout: Duration::from_secs(5),
         sample_count: 1,
-        params,
+        settings: kemuri_probes::ProbeSettings::Dns(ResolvedDnsParams {
+            domain: name.to_owned(),
+            record_type: Some(record_type.to_owned()),
+            resolver: server.map(str::to_owned),
+            protocol: "udp".to_owned(),
+            expected_rcode: "noerror".to_owned(),
+            require_answer: false,
+        }),
     }
 }
 

@@ -321,37 +321,30 @@ impl Probe for DnsProbe {
         _context: RoundContext,
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
-        let name = check
-            .params
-            .get("name")
-            .cloned()
-            .unwrap_or_else(|| check.address.clone());
-        let record_type_str = check
-            .params
-            .get("record_type")
-            .map(|s| s.as_str())
-            .unwrap_or("A");
+        let crate::ProbeSettings::Dns(settings) = &check.settings else {
+            return Err(ProbeExecutionError::Internal(
+                "DNS probe received settings for another probe type".to_owned(),
+            ));
+        };
+        let name = &settings.domain;
+        let record_type_str = settings.record_type.as_deref().unwrap_or("A");
         let record_type = Self::parse_record_type(record_type_str);
-        let server = check.params.get("server").map(|s| s.as_str());
+        let server = settings.resolver.as_deref();
 
         let effective = Self::new(DnsProbeConfig {
-            protocol: match check.params.get("protocol").map(String::as_str) {
-                Some("tcp") => DnsProtocol::Tcp,
+            protocol: match settings.protocol.as_str() {
+                "tcp" => DnsProtocol::Tcp,
                 _ => DnsProtocol::Udp,
             },
-            expected_rcode: match check.params.get("expected_rcode").map(String::as_str) {
-                Some("formerr") => DnsResponseCode::FormErr,
-                Some("servfail") => DnsResponseCode::ServFail,
-                Some("nxdomain") => DnsResponseCode::NXDomain,
-                Some("notimp") => DnsResponseCode::NotImp,
-                Some("refused") => DnsResponseCode::Refused,
+            expected_rcode: match settings.expected_rcode.as_str() {
+                "formerr" => DnsResponseCode::FormErr,
+                "servfail" => DnsResponseCode::ServFail,
+                "nxdomain" => DnsResponseCode::NXDomain,
+                "notimp" => DnsResponseCode::NotImp,
+                "refused" => DnsResponseCode::Refused,
                 _ => DnsResponseCode::NoError,
             },
-            require_answer: check
-                .params
-                .get("require_answer")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(self.config.require_answer),
+            require_answer: settings.require_answer,
         });
         let result = effective
             .execute_single(&name, record_type, server, check.timeout)

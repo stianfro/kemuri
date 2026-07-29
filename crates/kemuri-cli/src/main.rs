@@ -494,8 +494,6 @@ async fn run_check(config_path: &std::path::Path, target_check: &str) -> Result<
         _ => 1,
     };
 
-    let params = kemuri_server::worker_probe_params(&check_def.probe_params);
-
     let resolved_check = kemuri_probes::ResolvedCheck {
         check_id: check_def.check_id.clone(),
         target_id: check_def.target_id.clone(),
@@ -504,7 +502,7 @@ async fn run_check(config_path: &std::path::Path, target_check: &str) -> Result<
         probe_kind: check_def.probe_kind,
         timeout: check_def.timeout,
         sample_count,
-        params,
+        settings: check_def.probe_params.clone().into(),
     };
 
     let start = std::time::Instant::now();

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use kemuri_core::{CheckId, ObserverId, ProbeKind, ProfileId, SampleOutcome, TargetId};
@@ -15,7 +14,7 @@ fn make_icmp_check(address: &str) -> ResolvedCheck {
         probe_kind: ProbeKind::Icmp,
         timeout: Duration::from_secs(5),
         sample_count: 1,
-        params: HashMap::new(),
+        settings: kemuri_probes::ProbeSettings::Defaults,
     }
 }
 

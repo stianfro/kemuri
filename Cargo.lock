@@ -1297,6 +1297,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hickory-resolver",
+ "kemuri-config",
  "kemuri-core",
  "reqwest",
  "rustls",

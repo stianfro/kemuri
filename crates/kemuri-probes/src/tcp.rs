@@ -286,33 +286,27 @@ impl Probe for TcpProbe {
         _context: RoundContext,
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
-        let host = check
-            .params
-            .get("host")
-            .cloned()
-            .unwrap_or_else(|| check.address.clone());
-        let port: u16 = check
-            .params
-            .get("port")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(80);
+        let crate::ProbeSettings::Tcp(settings) = &check.settings else {
+            return Err(ProbeExecutionError::Internal(
+                "TCP probe received settings for another probe type".to_owned(),
+            ));
+        };
+        let host = &settings.host;
+        let port = settings.port;
 
         let effective = Self::new(TcpProbeConfig {
-            address_family: match check.params.get("address_family").map(String::as_str) {
-                Some("ipv4") => AddressFamily::Ipv4,
-                Some("ipv6") => AddressFamily::Ipv6,
+            address_family: match settings.address_family.as_str() {
+                "ipv4" => AddressFamily::Ipv4,
+                "ipv6" => AddressFamily::Ipv6,
                 _ => AddressFamily::Auto,
             },
-            source_address: check
-                .params
-                .get("source_address")
-                .cloned()
-                .or_else(|| self.config.source_address.clone()),
-            tls: check
-                .params
-                .get("tls")
-                .and_then(|value| serde_json::from_str(value).ok())
-                .or_else(|| self.config.tls.clone()),
+            source_address: settings.source_address.clone(),
+            tls: settings.tls.as_ref().map(|tls| TcpTlsConfig {
+                enabled: tls.enabled,
+                server_name: tls.server_name.clone(),
+                tls_validate: tls.tls_validate,
+                root_certificates: tls.root_certificates.clone(),
+            }),
         });
         let result = effective.execute_single(&host, port, check.timeout).await;
 

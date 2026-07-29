@@ -1,13 +1,10 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
+use kemuri_config::ResolvedTcpParams;
 use kemuri_core::{CheckId, ObserverId, ProbeKind, ProfileId, SampleOutcome, TargetId};
 use kemuri_probes::{Probe, ResolvedCheck, RoundContext, TcpProbe, TcpProbeConfig};
 
 fn make_tcp_check(host: &str, port: u16) -> ResolvedCheck {
-    let mut params = HashMap::new();
-    params.insert("host".to_owned(), host.to_owned());
-    params.insert("port".to_owned(), port.to_string());
     ResolvedCheck {
         check_id: CheckId::new("test-tcp").unwrap(),
         target_id: TargetId::new("test-target").unwrap(),
@@ -16,7 +13,13 @@ fn make_tcp_check(host: &str, port: u16) -> ResolvedCheck {
         probe_kind: ProbeKind::Tcp,
         timeout: Duration::from_secs(5),
         sample_count: 1,
-        params,
+        settings: kemuri_probes::ProbeSettings::Tcp(ResolvedTcpParams {
+            host: host.to_owned(),
+            port,
+            address_family: "auto".to_owned(),
+            source_address: None,
+            tls: None,
+        }),
     }
 }
 

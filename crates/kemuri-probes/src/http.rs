@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use kemuri_core::{ProbeKind, SampleOutcome};
 use serde::{Deserialize, Serialize};
 
-use crate::{Probe, ProbeExecutionError, ProbeRound, ResolvedCheck, RoundContext, SampleResult};
+use crate::{
+    Probe, ProbeExecutionError, ProbeRound, ProbeSettings, ResolvedCheck, RoundContext,
+    SampleResult,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,76 +99,38 @@ impl HttpProbe {
         &self,
         check: &ResolvedCheck,
     ) -> Result<HttpProbeConfig, ProbeExecutionError> {
-        let mut config = self.config.clone();
-        if let Some(url) = check.params.get("url") {
-            config.url = url.clone();
-        }
+        let config = match &check.settings {
+            ProbeSettings::Http(settings) => HttpProbeConfig {
+                url: settings.url.clone(),
+                method: settings.method.clone(),
+                headers: settings.headers.clone(),
+                expected_status: settings.expected_status,
+                expected_status_range: settings.expected_status_range,
+                follow_redirects: settings.follow_redirects,
+                max_redirects: settings.max_redirect_count,
+                tls_validate: settings.tls_validate,
+                connection_mode: match settings.connection_mode.as_str() {
+                    "per_round" => HttpConnectionMode::PerRound,
+                    "fresh" => HttpConnectionMode::Fresh,
+                    _ => HttpConnectionMode::Pooled,
+                },
+                user_agent: settings.user_agent.clone(),
+                body: settings.body.clone(),
+                measure_until: settings.measure_until.clone(),
+                root_certificates: settings.root_certificates.clone(),
+            },
+            ProbeSettings::Defaults => self.config.clone(),
+            _ => {
+                return Err(ProbeExecutionError::Internal(
+                    "HTTP probe received settings for another probe type".to_owned(),
+                ));
+            }
+        };
         if config.url.is_empty() {
             return Err(ProbeExecutionError::Internal(
                 "HTTP check has no configured URL".to_owned(),
             ));
         }
-        if let Some(method) = check.params.get("method") {
-            config.method = Some(method.clone());
-        }
-        if let Some(status) = check.params.get("expected_status") {
-            config.expected_status = Some(status.parse().map_err(|_| {
-                ProbeExecutionError::Internal("invalid expected HTTP status".to_owned())
-            })?);
-        }
-        if let Some(range) = check.params.get("expected_status_range") {
-            let (start, end) = range.split_once('-').ok_or_else(|| {
-                ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
-            })?;
-            config.expected_status_range = Some((
-                start.parse().map_err(|_| {
-                    ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
-                })?,
-                end.parse().map_err(|_| {
-                    ProbeExecutionError::Internal("invalid expected HTTP status range".to_owned())
-                })?,
-            ));
-        }
-        if let Some(headers) = check.params.get("headers") {
-            config.headers = serde_json::from_str(headers)
-                .map_err(|e| ProbeExecutionError::Internal(format!("invalid HTTP headers: {e}")))?;
-        }
-        config.body = check.params.get("body").cloned();
-        config.follow_redirects = check
-            .params
-            .get("follow_redirects")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(config.follow_redirects);
-        config.max_redirects = check
-            .params
-            .get("max_redirect_count")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(config.max_redirects);
-        config.tls_validate = check
-            .params
-            .get("tls_validate")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(config.tls_validate);
-        config.user_agent = check
-            .params
-            .get("user_agent")
-            .cloned()
-            .or(config.user_agent);
-        config.measure_until = check
-            .params
-            .get("measure_until")
-            .cloned()
-            .unwrap_or(config.measure_until);
-        if let Some(certificates) = check.params.get("root_certificates") {
-            config.root_certificates = serde_json::from_str(certificates).map_err(|error| {
-                ProbeExecutionError::Internal(format!("invalid root certificates: {error}"))
-            })?;
-        }
-        config.connection_mode = match check.params.get("connection_mode").map(String::as_str) {
-            Some("per_round") => HttpConnectionMode::PerRound,
-            Some("fresh") => HttpConnectionMode::Fresh,
-            _ => HttpConnectionMode::Pooled,
-        };
         Ok(config)
     }
 

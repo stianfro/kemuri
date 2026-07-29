@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use kemuri_config::{
+    ResolvedDnsParams, ResolvedHttpParams, ResolvedIcmpParams, ResolvedProbeParams,
+    ResolvedTcpParams,
+};
 use kemuri_core::{CheckId, ObserverId, ProbeKind, ProfileId, SampleOutcome, TargetId};
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +59,27 @@ pub struct ResolvedCheck {
     pub probe_kind: ProbeKind,
     pub timeout: Duration,
     pub sample_count: u32,
-    pub params: HashMap<String, String>,
+    pub settings: ProbeSettings,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProbeSettings {
+    Icmp(ResolvedIcmpParams),
+    Http(ResolvedHttpParams),
+    Tcp(ResolvedTcpParams),
+    Dns(ResolvedDnsParams),
+    Defaults,
+}
+
+impl From<ResolvedProbeParams> for ProbeSettings {
+    fn from(value: ResolvedProbeParams) -> Self {
+        match value {
+            ResolvedProbeParams::Icmp(params) => Self::Icmp(params),
+            ResolvedProbeParams::Http(params) => Self::Http(params),
+            ResolvedProbeParams::Tcp(params) => Self::Tcp(params),
+            ResolvedProbeParams::Dns(params) => Self::Dns(params),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -81,7 +81,6 @@ impl Probe for SyntheticProbe {
 mod tests {
     use super::*;
     use kemuri_core::{CheckId, ObserverId, ProfileId, TargetId};
-    use std::collections::HashMap;
 
     fn make_check() -> ResolvedCheck {
         ResolvedCheck {
@@ -92,7 +91,7 @@ mod tests {
             probe_kind: ProbeKind::Http,
             timeout: Duration::from_secs(5),
             sample_count: 1,
-            params: HashMap::new(),
+            settings: crate::ProbeSettings::Defaults,
         }
     }
 

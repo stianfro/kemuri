@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
+use kemuri_config::ResolvedHttpParams;
 use kemuri_core::{CheckId, ObserverId, ProbeKind, ProfileId, SampleOutcome, TargetId};
 use kemuri_probes::{
     HttpConnectionMode, HttpProbe, HttpProbeConfig, Probe, ResolvedCheck, RoundContext,
@@ -16,7 +16,7 @@ fn make_check() -> ResolvedCheck {
         probe_kind: ProbeKind::Http,
         timeout: Duration::from_secs(10),
         sample_count: 1,
-        params: HashMap::new(),
+        settings: kemuri_probes::ProbeSettings::Defaults,
     }
 }
 
@@ -220,20 +220,23 @@ async fn http_probe_uses_resolved_check_request() {
 
     let probe = HttpProbe::new(HttpProbeConfig::default()).unwrap();
     let mut check = make_check();
-    check.params.insert(
-        "url".to_owned(),
-        format!("http://127.0.0.1:{port}/configured"),
-    );
-    check.params.insert("method".to_owned(), "POST".to_owned());
-    check
-        .params
-        .insert("expected_status".to_owned(), "204".to_owned());
-    check
-        .params
-        .insert("headers".to_owned(), r#"{"X-Kemuri":"yes"}"#.to_owned());
-    check
-        .params
-        .insert("body".to_owned(), "probe-body".to_owned());
+    check.settings = kemuri_probes::ProbeSettings::Http(ResolvedHttpParams {
+        url: format!("http://127.0.0.1:{port}/configured"),
+        method: Some("POST".to_owned()),
+        headers: [("X-Kemuri".to_owned(), "yes".to_owned())]
+            .into_iter()
+            .collect(),
+        expected_status: Some(204),
+        expected_status_range: None,
+        body: Some("probe-body".to_owned()),
+        follow_redirects: true,
+        max_redirect_count: 10,
+        connection_mode: "pooled".to_owned(),
+        measure_until: "headers".to_owned(),
+        user_agent: None,
+        tls_validate: true,
+        root_certificates: Vec::new(),
+    });
 
     let result = probe.execute_round(make_context(), check).await.unwrap();
     assert_eq!(result.results[0].outcome, SampleOutcome::Success);

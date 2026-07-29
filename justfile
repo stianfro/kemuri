@@ -71,8 +71,12 @@ test-usage:
 test-container:
     bash packaging/tests/container.sh
 
-test-load:
+test-load: build
     cargo test -p kemuri-server --test load
+    python3 packaging/tests/load.py --checks 100 --duration 3 --interval 1s --output -
+
+load-test-local *args: build
+    python3 packaging/tests/load.py {{args}}
 
 bench:
     cargo bench --workspace --no-run

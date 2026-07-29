@@ -14,8 +14,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker build -f "$root/packaging/container/Dockerfile" -t "$image" "$root"
+docker build --build-arg KEMURI_GIT_HASH=container-test \
+  -f "$root/packaging/container/Dockerfile" -t "$image" "$root"
 test "$(docker image inspect "$image" --format '{{.Config.User}}')" = kemuri
+docker run --rm "$image" version | grep -F 'git: container-test' >/dev/null
 docker volume create "$volume" >/dev/null
 
 cat >"$tmp/kemuri.yaml" <<'YAML'

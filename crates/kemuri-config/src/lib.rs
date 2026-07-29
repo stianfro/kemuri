@@ -6,6 +6,7 @@ use kemuri_core::{
     CheckId, CheckRevisionId, ConfigGeneration, NotifierId, ProbeKind, ProfileId, RuleId, TargetId,
     parse_duration,
 };
+use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -1128,16 +1129,27 @@ fn validate_resolved_probe_params(
     };
     let validate_certificates = |certificates: &[String]| -> Result<(), ConfigError> {
         for certificate in certificates {
-            let bytes = std::fs::read(certificate).map_err(|error| {
-                ConfigError::validation(
-                    format!("{path}.root_certificates"),
-                    format!("cannot read {certificate}: {error}"),
-                )
-            })?;
-            if bytes.is_empty() {
+            let certificates = rustls::pki_types::CertificateDer::pem_file_iter(certificate)
+                .map_err(|error| {
+                    ConfigError::validation(
+                        format!("{path}.root_certificates"),
+                        format!("cannot read {certificate}: {error}"),
+                    )
+                })?;
+            let mut found = false;
+            for parsed in certificates {
+                parsed.map_err(|error| {
+                    ConfigError::validation(
+                        format!("{path}.root_certificates"),
+                        format!("invalid PEM certificate {certificate}: {error}"),
+                    )
+                })?;
+                found = true;
+            }
+            if !found {
                 return Err(ConfigError::validation(
                     format!("{path}.root_certificates"),
-                    format!("{certificate} is empty"),
+                    format!("{certificate} contains no PEM certificates"),
                 ));
             }
         }
@@ -2342,5 +2354,33 @@ targets:
         };
         assert_eq!(http.expected_status_range, Some((200, 399)));
         assert_eq!(http.measure_until, "body");
+    }
+
+    #[test]
+    fn reject_invalid_root_certificate_before_startup() {
+        let path =
+            std::env::temp_dir().join(format!("kemuri-invalid-certificate-{}", std::process::id()));
+        std::fs::write(&path, "not a PEM certificate").unwrap();
+        let yaml = format!(
+            r#"
+version: 1
+profiles:
+  - kind: http
+    id: web
+    url: https://example.test
+    root_certificates:
+      - {}
+targets:
+  - id: local
+    address: 127.0.0.1
+    checks:
+      - id: web
+        profile: web
+"#,
+            path.display()
+        );
+        let result = KemuriConfig::parse(&yaml).and_then(|config| config.resolve().map(|_| ()));
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_err());
     }
 }

@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
                 let yaml = std::fs::read_to_string(&config)?;
                 let raw: kemuri_config::KemuriConfig = serde_yaml::from_str(&yaml)?;
                 let warnings = raw.validate_with_warnings()?;
+                raw.resolve()?;
                 if warnings.is_empty() {
                     println!("Configuration is valid.");
                 } else {

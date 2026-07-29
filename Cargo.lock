@@ -1299,6 +1299,7 @@ dependencies = [
  "hex",
  "http",
  "kemuri-core",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",

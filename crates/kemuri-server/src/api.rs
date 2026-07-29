@@ -180,7 +180,7 @@ pub async fn list_alerts(
         });
     }
 
-    responses.sort_by(|left, right| right.internal_id.cmp(&left.internal_id));
+    responses.sort_by_key(|alert| std::cmp::Reverse(alert.internal_id));
     if let Some(cursor) = cursor {
         responses.retain(|alert| alert.internal_id < cursor);
     }
@@ -378,7 +378,7 @@ pub async fn list_alert_events(
         });
     }
 
-    responses.sort_by(|left, right| right.internal_id.cmp(&left.internal_id));
+    responses.sort_by_key(|event| std::cmp::Reverse(event.internal_id));
     if let Some(cursor) = cursor {
         responses.retain(|event| event.internal_id < cursor);
     }

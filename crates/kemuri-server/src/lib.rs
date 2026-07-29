@@ -70,6 +70,8 @@ pub struct AppState {
     pub reload_tx: mpsc::Sender<()>,
     pub disk_ready: Arc<AtomicBool>,
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    pub runtime_ready: Arc<AtomicBool>,
+    pub probe_ready: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -107,7 +109,7 @@ pub async fn serve(
 
     let pool = storage.pool().clone();
 
-    kemuri_storage::reconcile(&pool, &config)
+    kemuri_storage::reconcile_with_event(&pool, &config, "startup")
         .await
         .map_err(|e| ServerError::Storage(e.to_string()))?;
 
@@ -128,6 +130,13 @@ pub async fn serve(
     }
 
     let icmp_cap = check_icmp_capability();
+    let probe_ready = Arc::new(AtomicBool::new(
+        icmp_cap.is_available()
+            || !resolved
+                .checks
+                .iter()
+                .any(|check| check.probe_kind == kemuri_core::ProbeKind::Icmp),
+    ));
     if icmp_cap.is_available() {
         let icmp_config = IcmpProbeConfig::default();
         registry.register(Arc::new(IcmpProbe::new(icmp_config)));
@@ -336,6 +345,7 @@ pub async fn serve(
     let last_reload = Arc::new(std::sync::RwLock::new(None::<ReloadStatus>));
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(4);
+    let runtime_ready = Arc::new(AtomicBool::new(true));
 
     let state = AppState {
         build_info: Arc::new(build_info),
@@ -350,6 +360,8 @@ pub async fn serve(
         reload_tx: reload_tx.clone(),
         disk_ready,
         shutdown_tx: shutdown_tx.clone(),
+        runtime_ready: runtime_ready.clone(),
+        probe_ready: probe_ready.clone(),
     };
 
     let config_path_arc = state.config_path.clone();
@@ -407,8 +419,12 @@ pub async fn serve(
     let result = loop {
         tokio::select! {
             result = &mut server => break result,
-            _ = shutdown_rx_main.recv() => break Ok(()),
+            _ = shutdown_rx_main.recv() => {
+                runtime_ready.store(false, Ordering::Release);
+                break Ok(());
+            },
             Some(component) = fatal_rx.recv() => {
+                runtime_ready.store(false, Ordering::Release);
                 tracing::error!(component, "required runtime task exited unexpectedly");
                 break Err(std::io::Error::other(format!(
                     "required runtime task exited: {component}"
@@ -419,12 +435,12 @@ pub async fn serve(
                 &shared_config,
                 &shared_notifiers,
                 &mut scheduler_inst,
-                &writer_storage,
                 &event_tx,
                 &last_reload,
                 &pool,
                 observer_internal_id,
                 &config_path_arc,
+                &probe_ready,
             ).await;
             }
         }
@@ -472,12 +488,12 @@ async fn perform_reload(
     shared_config: &Arc<std::sync::RwLock<Arc<KemuriConfig>>>,
     shared_notifiers: &Arc<std::sync::RwLock<HashMap<NotifierId, Arc<dyn Notifier>>>>,
     scheduler: &mut Scheduler,
-    storage: &Arc<StorageManager>,
     event_tx: &tokio::sync::broadcast::Sender<SystemEvent>,
     last_reload: &Arc<std::sync::RwLock<Option<ReloadStatus>>>,
     pool: &sqlx::SqlitePool,
     _observer_internal_id: i64,
     config_path: &std::path::Path,
+    probe_ready: &Arc<AtomicBool>,
 ) {
     tracing::info!("SIGHUP received, attempting configuration reload");
 
@@ -529,7 +545,7 @@ async fn perform_reload(
         }
     };
 
-    if let Err(e) = kemuri_storage::reconcile(pool, &new_config).await {
+    if let Err(e) = kemuri_storage::reconcile_with_event(pool, &new_config, "reload").await {
         tracing::error!(error = %e, "config reload failed: database reconciliation error");
         metrics::counter!("kemuri_config_reload_total", "result" => "failure").increment(1);
         let status = ReloadStatus {
@@ -547,6 +563,15 @@ async fn perform_reload(
     }
 
     scheduler.reconcile(new_resolved.checks.clone()).await;
+    let icmp_available = check_icmp_capability().is_available();
+    probe_ready.store(
+        icmp_available
+            || !new_resolved
+                .checks
+                .iter()
+                .any(|check| check.probe_kind == kemuri_core::ProbeKind::Icmp),
+        Ordering::Release,
+    );
 
     {
         *shared_notifiers.write().unwrap() = notifier_map;
@@ -555,14 +580,6 @@ async fn perform_reload(
     {
         *shared_config.write().unwrap() = Arc::new(new_config);
     }
-
-    let _ = storage
-        .write_config_event(kemuri_storage::InsertConfigEvent {
-            generation_hash: new_generation.clone(),
-            event_type: "reload".to_owned(),
-            summary: Some("configuration reloaded via SIGHUP".to_owned()),
-        })
-        .await;
 
     let _ = event_tx.send(SystemEvent::config_reloaded(&new_generation, "success"));
 
@@ -739,6 +756,16 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(State(state): State<AppState>) -> Response {
+    if !state.runtime_ready.load(Ordering::Acquire) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "runtime task unavailable").into_response();
+    }
+    if !state.probe_ready.load(Ordering::Acquire) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "probe capability unavailable",
+        )
+            .into_response();
+    }
     if !state.disk_ready.load(Ordering::Acquire) {
         return (StatusCode::SERVICE_UNAVAILABLE, "disk pressure").into_response();
     }
@@ -825,6 +852,8 @@ async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value>
         "disk_free_bytes": disk_free_bytes,
         "disk_total_bytes": disk_total_bytes,
         "disk_ready": state.disk_ready.load(Ordering::Acquire),
+        "runtime_ready": state.runtime_ready.load(Ordering::Acquire),
+        "probe_ready": state.probe_ready.load(Ordering::Acquire),
         "schema_version": schema_version.0,
         "config_generation": config_generation.0,
         "notification_outbox_pending": pending_outbox.0,

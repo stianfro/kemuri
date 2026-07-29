@@ -30,57 +30,24 @@ fn make_resolved_check(check_id: &str, target_id: &str) -> ResolvedCheck {
 }
 
 fn make_test_config() -> KemuriConfig {
-    KemuriConfig {
-        version: 1,
-        server: kemuri_config::ServerConfig::default(),
-        logging: kemuri_config::LoggingConfig::default(),
-        storage: kemuri_config::StorageConfig::default(),
-        scheduler: kemuri_config::SchedulerConfig::default(),
-        profiles: vec![],
-        notifiers: vec![],
-        rules: vec![],
-        targets: vec![kemuri_config::TargetConfig {
-            id: TargetId::new("web-1").unwrap(),
-            address: "127.0.0.1".to_owned(),
-            name: Some("Web Server 1".to_owned()),
-            group_path: Some("web".to_owned()),
-            labels: None,
-            checks: vec![kemuri_config::CheckConfig {
-                id: CheckId::new("synth-check").unwrap(),
-                profile: ProfileId::new("http-default").unwrap(),
-                enabled: true,
-                kind: None,
-                interval: None,
-                timeout: None,
-                url: None,
-                method: None,
-                headers: None,
-                expected_status: None,
-                body: None,
-                host: None,
-                port: None,
-                domain: None,
-                record_type: None,
-                resolver: None,
-                count: None,
-                address_family: None,
-                payload_size: None,
-                source_address: None,
-                follow_redirects: None,
-                max_redirect_count: None,
-                connection_mode: None,
-                measure_until: None,
-                user_agent: None,
-                tls_validate: None,
-                root_certificates: None,
-                tls: None,
-                protocol: None,
-                expected_rcode: None,
-                require_answer: None,
-            }],
-            enabled: true,
-        }],
-    }
+    serde_yaml::from_str(
+        r#"
+version: 1
+profiles:
+  - kind: http
+    id: http-default
+    url: http://127.0.0.1
+    interval: 30s
+    timeout: 5s
+targets:
+  - id: web-1
+    address: 127.0.0.1
+    checks:
+      - id: synth-check
+        profile: http-default
+"#,
+    )
+    .unwrap()
 }
 
 #[tokio::test]

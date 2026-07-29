@@ -308,7 +308,7 @@ impl Probe for TcpProbe {
                 root_certificates: tls.root_certificates.clone(),
             }),
         });
-        let result = effective.execute_single(&host, port, check.timeout).await;
+        let result = effective.execute_single(host, port, check.timeout).await;
 
         Ok(ProbeRound {
             check_id: check.check_id,

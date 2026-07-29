@@ -4,8 +4,6 @@ use sqlx::SqlitePool;
 
 use kemuri_config::KemuriConfig;
 
-use crate::repos::{CheckRepo, TargetRepo};
-
 #[derive(Debug, thiserror::Error)]
 pub enum ReconciliationError {
     #[error("probe type mismatch for check {check_id}: existing={existing}, new={new}")]
@@ -16,143 +14,220 @@ pub enum ReconciliationError {
     },
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 pub async fn reconcile(
     pool: &SqlitePool,
     config: &KemuriConfig,
 ) -> Result<(), ReconciliationError> {
-    let resolved = config.resolve().ok();
-    let generation = config.generation_hash().to_string();
-    let active_targets = TargetRepo::list_active(pool).await?;
-    let active_target_ids: HashSet<String> =
-        active_targets.iter().map(|t| t.target_id.clone()).collect();
+    reconcile_with_event(pool, config, "reconcile").await
+}
 
-    let config_target_ids: HashSet<String> = config
+pub async fn reconcile_with_event(
+    pool: &SqlitePool,
+    config: &KemuriConfig,
+    event_type: &str,
+) -> Result<(), ReconciliationError> {
+    let resolved = config
+        .resolve()
+        .map_err(|error| ReconciliationError::Config(error.to_string()))?;
+    let generation = resolved.generation.to_string();
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query("INSERT OR IGNORE INTO observers (observer_id) VALUES ('local')")
+        .execute(&mut *transaction)
+        .await?;
+    let observer_id: i64 =
+        sqlx::query_scalar("SELECT internal_id FROM observers WHERE observer_id = 'local'")
+            .fetch_one(&mut *transaction)
+            .await?;
+
+    let configured_targets: HashSet<String> = config
         .targets
         .iter()
         .filter(|target| target.enabled)
-        .map(|t| t.id.to_string())
+        .map(|target| target.id.to_string())
         .collect();
-
-    for removed_id in active_target_ids.difference(&config_target_ids) {
-        TargetRepo::deactivate(pool, removed_id).await?;
+    let active_target_ids: Vec<String> =
+        sqlx::query_scalar("SELECT target_id FROM targets WHERE active = 1")
+            .fetch_all(&mut *transaction)
+            .await?;
+    for target_id in active_target_ids {
+        if !configured_targets.contains(&target_id) {
+            sqlx::query("UPDATE targets SET active = 0 WHERE target_id = ?")
+                .bind(target_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
     }
 
     for target in &config.targets {
-        let target_id_str = target.id.to_string();
+        let target_id = target.id.to_string();
         if !target.enabled {
-            TargetRepo::deactivate(pool, &target_id_str).await?;
+            sqlx::query("UPDATE targets SET active = 0 WHERE target_id = ?")
+                .bind(&target_id)
+                .execute(&mut *transaction)
+                .await?;
             continue;
         }
-        let name = target.name.as_deref().unwrap_or(&target_id_str);
+        let name = target.name.as_deref().unwrap_or(&target_id);
         let group_path = target.group_path.as_deref().unwrap_or("");
-        let labels = target
-            .labels
-            .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap_or_default())
-            .unwrap_or_default();
+        let labels = serde_json::to_string(&target.labels.clone().unwrap_or_default())
+            .unwrap_or_else(|_| "{}".to_owned());
+        let target_internal_id: i64 = sqlx::query_scalar(
+            "INSERT INTO targets (target_id, name, group_path, labels) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(target_id) DO UPDATE SET name = excluded.name, \
+             group_path = excluded.group_path, labels = excluded.labels, active = 1, \
+             last_seen_at = datetime('now') RETURNING internal_id",
+        )
+        .bind(&target_id)
+        .bind(name)
+        .bind(group_path)
+        .bind(labels)
+        .fetch_one(&mut *transaction)
+        .await?;
 
-        let target_internal_id =
-            TargetRepo::upsert(pool, &target_id_str, name, group_path, &labels).await?;
-
-        let active_checks = CheckRepo::list_active_by_target(pool, target_internal_id).await?;
-        let active_check_ids: HashSet<String> =
-            active_checks.iter().map(|c| c.check_id.clone()).collect();
-
-        let config_check_ids: HashSet<String> = target
+        let active_checks: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT internal_id, check_id, probe_type FROM checks \
+             WHERE target_internal_id = ? AND active = 1",
+        )
+        .bind(target_internal_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let configured_checks: HashSet<String> = target
             .checks
             .iter()
             .filter(|check| check.enabled)
-            .map(|c| c.id.to_string())
+            .map(|check| check.id.to_string())
             .collect();
 
-        for existing_check in &active_checks {
-            if let Some(config_check) = target
+        for (_, check_id, probe_type) in &active_checks {
+            if let Some(check) = target
                 .checks
                 .iter()
-                .find(|c| c.id.to_string() == existing_check.check_id)
-            {
-                let profile = config
+                .find(|check| check.id.as_str() == check_id)
+                && let Some(profile) = config
                     .profiles
                     .iter()
-                    .find(|p| p.id() == &config_check.profile);
-                if let Some(profile) = profile {
-                    let new_type = profile.kind().to_string();
-                    if existing_check.probe_type != new_type {
-                        return Err(ReconciliationError::ProbeTypeMismatch {
-                            check_id: existing_check.check_id.clone(),
-                            existing: existing_check.probe_type.clone(),
-                            new: new_type,
-                        });
-                    }
-                }
+                    .find(|profile| profile.id() == &check.profile)
+                && profile.kind().to_string() != *probe_type
+            {
+                return Err(ReconciliationError::ProbeTypeMismatch {
+                    check_id: check_id.clone(),
+                    existing: probe_type.clone(),
+                    new: profile.kind().to_string(),
+                });
             }
-        }
-
-        for removed_check_id in active_check_ids.difference(&config_check_ids) {
-            CheckRepo::deactivate(pool, target_internal_id, removed_check_id).await?;
+            if !configured_checks.contains(check_id) {
+                sqlx::query(
+                    "UPDATE checks SET active = 0 WHERE target_internal_id = ? AND check_id = ?",
+                )
+                .bind(target_internal_id)
+                .bind(check_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
         }
 
         for check in &target.checks {
-            let check_id_str = check.id.to_string();
+            let check_id = check.id.to_string();
             if !check.enabled {
-                CheckRepo::deactivate(pool, target_internal_id, &check_id_str).await?;
+                sqlx::query(
+                    "UPDATE checks SET active = 0 WHERE target_internal_id = ? AND check_id = ?",
+                )
+                .bind(target_internal_id)
+                .bind(&check_id)
+                .execute(&mut *transaction)
+                .await?;
                 continue;
             }
-            let profile = config.profiles.iter().find(|p| p.id() == &check.profile);
-            let probe_type = profile.map(|p| p.kind().to_string()).unwrap_or_default();
-            let revision_id: Option<&str> = None;
-
-            let check_internal_id = CheckRepo::upsert(
-                pool,
-                target_internal_id,
-                &check_id_str,
-                &probe_type,
-                revision_id,
-            )
-            .await?;
-            if let Some(resolved_check) = resolved
-                .as_ref()
-                .into_iter()
-                .flat_map(|resolved| &resolved.checks)
+            let resolved_check = resolved
+                .checks
+                .iter()
                 .find(|item| item.target_id == target.id && item.check_id == check.id)
-            {
-                let redacted = serde_json::json!({
-                    "probe_kind": resolved_check.probe_kind.to_string(),
-                    "interval_ms": resolved_check.interval.as_millis(),
-                    "timeout_ms": resolved_check.timeout.as_millis()
-                })
-                .to_string();
-                sqlx::query(
-                    "UPDATE checks SET profile_id = ?, config_generation = ?, \
-                     current_revision_id = ?, redacted_resolved_config = ? WHERE internal_id = ?",
-                )
-                .bind(check.profile.as_str())
-                .bind(&generation)
-                .bind(resolved_check.revision_id.as_str())
-                .bind(&redacted)
-                .bind(check_internal_id)
-                .execute(pool)
-                .await?;
-                sqlx::query(
-                    "INSERT OR IGNORE INTO check_revisions \
-                     (check_internal_id, revision_id, redacted_config) VALUES (?, ?, ?)",
-                )
-                .bind(check_internal_id)
-                .bind(resolved_check.revision_id.as_str())
-                .bind(redacted)
-                .execute(pool)
-                .await?;
-            }
+                .ok_or_else(|| {
+                    ReconciliationError::Config(format!(
+                        "missing resolved check {target_id}/{check_id}"
+                    ))
+                })?;
+            let redacted = serde_json::json!({
+                "probe_kind": resolved_check.probe_kind.to_string(),
+                "interval_ms": resolved_check.interval.as_millis(),
+                "timeout_ms": resolved_check.timeout.as_millis()
+            })
+            .to_string();
+            let check_internal_id: i64 = sqlx::query_scalar(
+                "INSERT INTO checks (target_internal_id, check_id, probe_type, current_revision_id, \
+                 profile_id, config_generation, redacted_resolved_config, observer_assignment) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'local') \
+                 ON CONFLICT(target_internal_id, check_id) DO UPDATE SET \
+                 probe_type = excluded.probe_type, current_revision_id = excluded.current_revision_id, \
+                 profile_id = excluded.profile_id, config_generation = excluded.config_generation, \
+                 redacted_resolved_config = excluded.redacted_resolved_config, \
+                 observer_assignment = 'local', active = 1, last_seen_at = datetime('now') \
+                 RETURNING internal_id",
+            )
+            .bind(target_internal_id)
+            .bind(&check_id)
+            .bind(resolved_check.probe_kind.to_string())
+            .bind(resolved_check.revision_id.as_str())
+            .bind(check.profile.as_str())
+            .bind(&generation)
+            .bind(&redacted)
+            .fetch_one(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO check_revisions \
+                 (check_internal_id, revision_id, redacted_config) VALUES (?, ?, ?)",
+            )
+            .bind(check_internal_id)
+            .bind(resolved_check.revision_id.as_str())
+            .bind(&redacted)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO check_assignments (check_internal_id, observer_internal_id, active) \
+                 VALUES (?, ?, 1) ON CONFLICT(check_internal_id, observer_internal_id) \
+                 DO UPDATE SET active = 1",
+            )
+            .bind(check_internal_id)
+            .bind(observer_id)
+            .execute(&mut *transaction)
+            .await?;
         }
     }
 
+    sqlx::query(
+        "UPDATE check_assignments SET active = CASE WHEN EXISTS (
+             SELECT 1 FROM checks c
+             JOIN targets t ON t.internal_id = c.target_internal_id
+             WHERE c.internal_id = check_assignments.check_internal_id
+               AND c.active = 1 AND t.active = 1
+         ) THEN 1 ELSE 0 END
+         WHERE observer_internal_id = ?",
+    )
+    .bind(observer_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO config_events (generation_hash, event_type, summary) VALUES (?, ?, ?)",
+    )
+    .bind(&generation)
+    .bind(event_type)
+    .bind(format!("configuration {event_type}"))
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::repos::TargetRepo;
     use sqlx::sqlite::SqliteConnectOptions;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::str::FromStr;
@@ -310,5 +385,16 @@ targets:
         .unwrap();
         let result = reconcile(&pool, &config2).await;
         assert!(result.is_err());
+        let probe_type: String =
+            sqlx::query_scalar("SELECT probe_type FROM checks WHERE check_id = 'c1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM config_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(probe_type, "icmp");
+        assert_eq!(event_count, 1);
     }
 }

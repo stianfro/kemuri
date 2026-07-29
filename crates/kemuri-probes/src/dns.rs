@@ -347,7 +347,7 @@ impl Probe for DnsProbe {
             require_answer: settings.require_answer,
         });
         let result = effective
-            .execute_single(&name, record_type, server, check.timeout)
+            .execute_single(name, record_type, server, check.timeout)
             .await;
 
         Ok(ProbeRound {

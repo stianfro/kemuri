@@ -18,6 +18,33 @@ fn make_round_context() -> RoundContext {
     }
 }
 
+async fn local_dns_server() -> String {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut query = [0_u8; 2048];
+        let Ok((length, peer)) = socket.recv_from(&mut query).await else {
+            return;
+        };
+        let mut question_end = 12;
+        while question_end < length && query[question_end] != 0 {
+            question_end += query[question_end] as usize + 1;
+        }
+        question_end = (question_end + 5).min(length);
+        let mut response = query[..question_end].to_vec();
+        response[2] = 0x81;
+        response[3] = 0x80;
+        response[6] = 0;
+        response[7] = 1;
+        response[8..12].fill(0);
+        response.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 127, 0, 0, 1,
+        ]);
+        let _ = socket.send_to(&response, peer).await;
+    });
+    address.to_string()
+}
+
 fn make_resolved_check(
     check_id: &str,
     target_id: &str,
@@ -220,15 +247,16 @@ async fn e2e_dns_probe_executes() {
     registry.register(Arc::new(DnsProbe::new(DnsProbeConfig::default())));
 
     let ctx = make_round_context();
+    let server = local_dns_server().await;
     let check = make_resolved_check(
         "dns-check",
         "dns-target",
-        "example.com",
+        "example.test",
         ProbeKind::Dns,
         kemuri_probes::ProbeSettings::Dns(ResolvedDnsParams {
-            domain: "example.com".to_owned(),
+            domain: "example.test".to_owned(),
             record_type: Some("A".to_owned()),
-            resolver: Some("1.1.1.1".to_owned()),
+            resolver: Some(server),
             protocol: "udp".to_owned(),
             expected_rcode: "noerror".to_owned(),
             require_answer: false,

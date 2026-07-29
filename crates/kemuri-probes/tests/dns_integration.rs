@@ -6,6 +6,70 @@ use kemuri_probes::{
     DnsProbe, DnsProbeConfig, DnsProtocol, DnsResponseCode, Probe, ResolvedCheck, RoundContext,
 };
 
+fn dns_response(query: &[u8], rcode: u8) -> Vec<u8> {
+    let mut question_end = 12;
+    while question_end < query.len() && query[question_end] != 0 {
+        question_end += query[question_end] as usize + 1;
+    }
+    question_end = (question_end + 5).min(query.len());
+    let mut response = query[..question_end].to_vec();
+    response[2] = 0x81;
+    response[3] = 0x80 | (rcode & 0x0f);
+    response[6] = 0;
+    response[7] = if rcode == 0 { 1 } else { 0 };
+    response[8..12].fill(0);
+    if rcode == 0 {
+        response.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 127, 0, 0, 1,
+        ]);
+    }
+    response
+}
+
+async fn local_dns_server(rcode: u8) -> String {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0_u8; 2048];
+        for _ in 0..4 {
+            let received =
+                tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer)).await;
+            let Ok(Ok((length, peer))) = received else {
+                return;
+            };
+            if length < 12 {
+                continue;
+            }
+            let response = dns_response(&buffer[..length], rcode);
+            let _ = socket.send_to(&response, peer).await;
+        }
+    });
+    address.to_string()
+}
+
+async fn local_tcp_dns_server() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(length) = stream.read_u16().await else {
+            return;
+        };
+        let mut query = vec![0_u8; length as usize];
+        if stream.read_exact(&mut query).await.is_err() {
+            return;
+        }
+        let response = dns_response(&query, 0);
+        let _ = stream.write_u16(response.len() as u16).await;
+        let _ = stream.write_all(&response).await;
+    });
+    address.to_string()
+}
+
 fn make_dns_check(name: &str, record_type: &str, server: Option<&str>) -> ResolvedCheck {
     ResolvedCheck {
         check_id: CheckId::new("test-dns").unwrap(),
@@ -42,10 +106,11 @@ async fn dns_query_a_record_success() {
         require_answer: false,
     };
     let probe = DnsProbe::new(config);
+    let server = local_dns_server(0).await;
     let result = probe
         .execute_round(
             make_context(),
-            make_dns_check("example.com", "A", Some("1.1.1.1")),
+            make_dns_check("example.test", "A", Some(&server)),
         )
         .await
         .unwrap();
@@ -73,10 +138,11 @@ async fn dns_query_nxdomain() {
         require_answer: false,
     };
     let probe = DnsProbe::new(config);
+    let server = local_dns_server(3).await;
     let result = probe
         .execute_round(
             make_context(),
-            make_dns_check("nonexistent.invalid.example.com", "A", Some("1.1.1.1")),
+            make_dns_check("missing.example.test", "A", Some(&server)),
         )
         .await
         .unwrap();
@@ -143,6 +209,25 @@ async fn dns_query_connection_refused() {
 }
 
 #[tokio::test]
+async fn dns_query_over_tcp() {
+    let probe = DnsProbe::new(DnsProbeConfig {
+        protocol: DnsProtocol::Tcp,
+        expected_rcode: DnsResponseCode::NoError,
+        require_answer: true,
+    });
+    let server = local_tcp_dns_server().await;
+    let mut check = make_dns_check("example.test", "A", Some(&server));
+    let kemuri_probes::ProbeSettings::Dns(settings) = &mut check.settings else {
+        unreachable!();
+    };
+    settings.protocol = "tcp".to_owned();
+    settings.require_answer = true;
+
+    let result = probe.execute_round(make_context(), check).await.unwrap();
+    assert_eq!(result.results[0].outcome, SampleOutcome::Success);
+}
+
+#[tokio::test]
 async fn dns_metadata_fields() {
     let config = DnsProbeConfig {
         protocol: DnsProtocol::Udp,
@@ -150,10 +235,11 @@ async fn dns_metadata_fields() {
         require_answer: false,
     };
     let probe = DnsProbe::new(config);
+    let server = local_dns_server(0).await;
     let result = probe
         .execute_round(
             make_context(),
-            make_dns_check("example.com", "A", Some("1.1.1.1")),
+            make_dns_check("example.test", "A", Some(&server)),
         )
         .await
         .unwrap();

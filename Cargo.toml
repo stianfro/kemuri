@@ -87,7 +87,7 @@ checksum = "sha256"
 source-tarball = true
 install-path = "CARGO_HOME"
 install-updater = false
-include = ["packaging/kemuri.yaml", "packaging/systemd/kemuri.service"]
+include = ["README.md", "LICENSE", "CHANGELOG.md", "packaging/kemuri.yaml", "packaging/systemd/kemuri.service"]
 
 [workspace.metadata.dist.github-action-commits]
 "actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"

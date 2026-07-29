@@ -19,7 +19,7 @@ sed \
   "$root/packaging/kemuri.yaml" >"$tmp/kemuri.yaml"
 cp "$tmp/kemuri.yaml" "$tmp/valid.yaml"
 
-cargo build -p kemuri-cli --bin kemuri
+cargo build -p kemuri --bin kemuri
 binary="$root/target/debug/kemuri"
 "$binary" config validate --config "$tmp/kemuri.yaml"
 "$binary" version

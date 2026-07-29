@@ -1248,7 +1248,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kemuri-cli"
+name = "kemuri"
 version = "1.0.0"
 dependencies = [
  "anyhow",

@@ -53,6 +53,30 @@ kemuri serve --config ./kemuri.yaml
 
 Open `http://localhost:8080` for the web UI.
 
+## Install a release
+
+Release archives are available for Linux, macOS, and Windows. The shell and
+PowerShell installers select the correct archive and verify its SHA-256
+checksum.
+
+Linux and macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/stianfro/kemuri/releases/latest/download/kemuri-installer.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/stianfro/kemuri/releases/latest/download/kemuri-installer.ps1 | iex
+```
+
+Version tags also publish a signed-provenance multi-platform OCI image at
+`ghcr.io/stianfro/kemuri`. The release archives contain the sample
+configuration and systemd unit. GitHub Releases also contains a source archive
+and SHA-256 checksum files.
+
 ## CLI Commands
 
 | Command | Description |

@@ -47,6 +47,16 @@ test-load:
 bench:
     cargo bench --workspace --no-run
 
+release-generate:
+    dist generate
+
+release-check:
+    dist generate --check
+    dist plan --output-format=json | jq -e '.releases | length == 1' >/dev/null
+
+release-build *args:
+    dist build {{args}}
+
 yaml:
     find .github packaging -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 -r -n1 yq eval '.' >/dev/null
 
@@ -54,7 +64,7 @@ audit:
     cargo deny check
     cd web && npm audit --omit=dev --audit-level=high
 
-ci: fmt lint test test-web yaml
+ci: fmt lint test test-web yaml release-check
 
 ci-diff: fmt lint test
 

@@ -65,3 +65,30 @@ unsafe_code = "deny"
 
 [profile.release]
 panic = "unwind"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+checksum = "sha256"
+source-tarball = true
+install-path = "CARGO_HOME"
+install-updater = false
+include = ["packaging/kemuri.yaml", "packaging/systemd/kemuri.service"]
+
+[workspace.metadata.dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"

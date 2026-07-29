@@ -1,25 +1,22 @@
 # Changelog
 
-## 1.0.0
+All notable changes to Kemuri are recorded in this file.
 
-- Add typed probe settings, strict version 1 configuration validation, and stable revisions
-- Fix scheduler cadence, startup rounds, concurrency limits, reloads, and graceful shutdown
-- Add disk pressure controls, readiness checks, migration-backed runtime state, and safer retention
-- Add millisecond and microsecond API units, cursor validation, OpenAPI, group pages, and graph overlays
-- Embed the production web bundle and ship the `kemuri` binary
-- Add Linux release archives, multi-architecture container publishing, and local usage gates
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Kemuri uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.0
+## [Unreleased]
 
-Initial release.
+## [1.0.0] - 2026-07-29
 
-- ICMP, HTTP, TCP, and DNS probe types
-- YAML configuration with profile resolution and check overrides
-- SQLite storage with forward-only migrations
-- Smoke-style latency graphs in the web UI
-- Alert evaluation with pending/firing/resolved state machine
-- Webhook and SMTP notification delivery with retry
-- Prometheus metrics endpoint
-- SSE event stream for real-time updates
-- SIGHUP configuration reload
-- CLI commands: serve, version, config validate, doctor, check, database backup, notify test
+### Added
+
+- A single-node monitoring server with HTTP, TCP, DNS, ICMP, and synthetic probes.
+- A responsive web interface with live updates, smoke graphs, alerts, and system status.
+- Version 1 YAML configuration and HTTP API contracts.
+- SQLite retention, rollups, backups, migrations, alert history, and notification delivery.
+- Linux service and OCI image packaging.
+- Release archives and installers for Linux, macOS, and Windows on supported CPU targets.
+
+[Unreleased]: https://github.com/stianfro/kemuri/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/stianfro/kemuri/releases/tag/v1.0.0

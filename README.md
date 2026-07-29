@@ -2,6 +2,8 @@
 
 Latency monitoring with smoke-style graphs.
 
+Documentation: [stianfro.github.io/kemuri](https://stianfro.github.io/kemuri/)
+
 ## Quick Start
 
 Build:
@@ -114,7 +116,8 @@ Alert states are evaluated only for checks that use the rule profile. A rule can
 
 Send `SIGHUP`, or make a same-origin JSON `POST` to `/api/v1/config/reload`, to reload the file. Kemuri validates the new state before it replaces the active state. A failed reload leaves the active configuration in place. Cross-origin reload requests are rejected.
 
-For the complete field reference, see [Configuration version 1](docs/configuration.md).
+For the complete field reference, see the
+[configuration documentation](https://stianfro.github.io/kemuri/reference/configuration).
 
 ## API
 
@@ -135,7 +138,8 @@ API timestamps use Unix milliseconds and latency values use integer microseconds
 
 API errors contain a request ID. The same value is returned in `X-Request-ID`. Unknown API routes return JSON. Missing static assets return a normal HTTP 404.
 
-For the full contract and unit rules, see [HTTP API version 1](docs/api.md).
+For the full contract and unit rules, see the
+[HTTP API documentation](https://stianfro.github.io/kemuri/reference/api).
 
 ## Backups
 
@@ -144,10 +148,6 @@ Use `kemuri database backup --config <path> --output <file>` while the service i
 ## Reverse proxy
 
 Kemuri has no built-in authentication. Run it on a trusted host or behind a trusted reverse proxy. Keep CORS disabled unless another origin must read the API. Configure `server.public_url` when notification links must use the proxy URL. The proxy must support SSE without response buffering for `/api/v1/events`.
-
-## Upgrade from 0.1.0
-
-Version 1 keeps existing SQLite data and applies forward migrations. YAML and HTTP API compatibility with 0.1.0 is not guaranteed. Review renamed timestamp and latency fields, range parameters, status rules, disabled-entry behavior, and reload restrictions before the upgrade.
 
 ## Containers
 

@@ -37,6 +37,24 @@ web-build: api-generate
 web-dev:
     cd web && npm run dev
 
+docs-install:
+    cd site && npm ci
+
+docs-build: docs-install
+    cd site && npm run build
+
+docs-dev: docs-install
+    cd site && npm run dev
+
+docs-preview: docs-build
+    cd site && npm run preview
+
+docs-lint:
+    python3 site/scripts/lint-docs.py
+
+docs-test: docs-lint docs-build
+    cd site && npm audit --audit-level=high
+
 test-api:
     cargo test -p kemuri-server
     just api-check
@@ -76,7 +94,7 @@ audit:
     cargo deny check
     cd web && npm audit --omit=dev --audit-level=high
 
-ci: fmt lint test test-web yaml release-check
+ci: fmt lint test test-web docs-test yaml release-check
 
 ci-diff: fmt lint test
 

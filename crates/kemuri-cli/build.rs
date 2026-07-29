@@ -1,4 +1,17 @@
 fn main() {
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    if let Some(reference) = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        println!("cargo:rerun-if-changed=../../.git/{reference}");
+    }
+
     let git_hash = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()

@@ -1521,11 +1521,11 @@ pub struct CheckConfig {
     pub host: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
-    #[serde(default)]
+    #[serde(default, rename = "name", alias = "domain")]
     pub domain: Option<String>,
     #[serde(default)]
     pub record_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "server", alias = "resolver")]
     pub resolver: Option<String>,
     #[serde(default)]
     pub count: Option<u32>,
@@ -2354,6 +2354,33 @@ targets:
         };
         assert_eq!(http.expected_status_range, Some((200, 399)));
         assert_eq!(http.measure_until, "body");
+    }
+
+    #[test]
+    fn dns_check_accepts_name_and_server_overrides() {
+        let yaml = r#"
+version: 1
+profiles:
+  - kind: dns
+    id: resolver
+    name: profile.example
+    server: 192.0.2.1
+targets:
+  - id: local
+    address: 127.0.0.1
+    checks:
+      - id: resolver
+        profile: resolver
+        name: check.example
+        server: 192.0.2.2:5353
+"#;
+        let config = KemuriConfig::parse(yaml).unwrap();
+        let resolved = config.resolve().unwrap();
+        let ResolvedProbeParams::Dns(dns) = &resolved.checks[0].probe_params else {
+            panic!("expected DNS parameters");
+        };
+        assert_eq!(dns.domain, "check.example");
+        assert_eq!(dns.resolver.as_deref(), Some("192.0.2.2:5353"));
     }
 
     #[test]

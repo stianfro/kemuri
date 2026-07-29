@@ -21,6 +21,7 @@ export interface GroupResponse {
 export interface TargetsResponse {
   targets: TargetSummary[];
   groups: GroupResponse[];
+  next_cursor: string | null;
 }
 
 export interface CheckSummary {
@@ -139,6 +140,7 @@ export interface AlertState {
 
 export interface AlertsListResponse {
   alerts: AlertState[];
+  next_cursor: string | null;
 }
 
 export interface AlertEvent {
@@ -156,6 +158,17 @@ export interface AlertEvent {
 
 export interface AlertEventsResponse {
   events: AlertEvent[];
+  next_cursor: string | null;
+}
+
+export interface ChecksResponse {
+  checks: CheckSummary[];
+  next_cursor: string | null;
+}
+
+export interface GroupsResponse {
+  groups: GroupResponse[];
+  next_cursor: string | null;
 }
 
 export interface SystemStatus {
@@ -194,8 +207,8 @@ export async function fetchTarget(targetId: string): Promise<TargetDetail> {
   return fetchJson<TargetDetail>(`${BASE}/targets/${targetId}`);
 }
 
-export async function fetchChecks(targetId: string): Promise<CheckSummary[]> {
-  return fetchJson<CheckSummary[]>(`${BASE}/targets/${targetId}/checks`);
+export async function fetchChecks(targetId: string): Promise<ChecksResponse> {
+  return fetchJson<ChecksResponse>(`${BASE}/targets/${targetId}/checks`);
 }
 
 export async function fetchCheck(targetId: string, checkId: string): Promise<CheckDetail> {
@@ -233,7 +246,8 @@ export async function fetchRounds(
 }
 
 export async function fetchGroups(): Promise<GroupResponse[]> {
-  return fetchJson<GroupResponse[]>(`${BASE}/groups`);
+  const response = await fetchJson<GroupsResponse>(`${BASE}/groups`);
+  return response.groups;
 }
 
 export async function fetchGroup(groupPath: string): Promise<GroupResponse> {

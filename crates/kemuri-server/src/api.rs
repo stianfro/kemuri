@@ -76,6 +76,8 @@ pub struct AlertsQuery {
     pub rule_id: Option<String>,
     pub target_id: Option<String>,
     pub check_id: Option<String>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +97,7 @@ pub struct AlertStateResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertsListResponse {
     pub alerts: Vec<AlertStateResponse>,
+    pub next_cursor: Option<String>,
 }
 
 pub async fn list_alerts(
@@ -102,6 +105,8 @@ pub async fn list_alerts(
     Query(query): Query<AlertsQuery>,
 ) -> Result<Json<AlertsListResponse>, ApiError> {
     let pool = state.pool.clone();
+    let limit = validate_limit(query.limit, 100)?;
+    let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
 
     let alerts = if let Some(ref rule_id) = query.rule_id {
         kemuri_storage::AlertStateRepo::list_by_rule_id(&pool, rule_id)
@@ -163,7 +168,16 @@ pub async fn list_alerts(
         });
     }
 
-    Ok(Json(AlertsListResponse { alerts: responses }))
+    responses.sort_by(|left, right| right.internal_id.cmp(&left.internal_id));
+    if let Some(cursor) = cursor {
+        responses.retain(|alert| alert.internal_id < cursor);
+    }
+    let next_cursor = page_by_numeric_id(&mut responses, limit, |alert| alert.internal_id);
+
+    Ok(Json(AlertsListResponse {
+        alerts: responses,
+        next_cursor,
+    }))
 }
 
 pub async fn get_alert(
@@ -222,6 +236,7 @@ pub struct AlertEventsQuery {
     pub from: Option<String>,
     pub to: Option<String>,
     pub limit: Option<i64>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +257,7 @@ pub struct AlertEventResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertEventsResponse {
     pub events: Vec<AlertEventResponse>,
+    pub next_cursor: Option<String>,
 }
 
 pub async fn list_alert_events(
@@ -250,6 +266,7 @@ pub async fn list_alert_events(
 ) -> Result<Json<AlertEventsResponse>, ApiError> {
     let pool = state.pool.clone();
     let limit = validate_limit(query.limit, 100)?;
+    let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
 
     let events = if let Some(ref rule_id) = query.rule_id {
         kemuri_storage::AlertEventRepo::list_by_rule(&pool, rule_id, limit)
@@ -328,7 +345,16 @@ pub async fn list_alert_events(
         });
     }
 
-    Ok(Json(AlertEventsResponse { events: responses }))
+    responses.sort_by(|left, right| right.internal_id.cmp(&left.internal_id));
+    if let Some(cursor) = cursor {
+        responses.retain(|event| event.internal_id < cursor);
+    }
+    let next_cursor = page_by_numeric_id(&mut responses, limit, |event| event.internal_id);
+
+    Ok(Json(AlertEventsResponse {
+        events: responses,
+        next_cursor,
+    }))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,13 +376,23 @@ pub struct TargetSummary {
 pub struct TargetsResponse {
     pub targets: Vec<TargetSummary>,
     pub groups: Vec<GroupResponse>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PageQuery {
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
 }
 
 pub async fn list_targets(
     State(state): State<AppState>,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<TargetsResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
+    let limit = validate_limit(query.limit, 100)?;
+    let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let rows = kemuri_storage::TargetRepo::list_with_state(&pool, observer_id)
         .await
@@ -403,17 +439,41 @@ pub async fn list_targets(
         }
     }
 
-    let groups = target_map
+    all_targets.sort_by(|left, right| left.target_id.cmp(&right.target_id));
+    if let Some(cursor) = cursor {
+        all_targets.retain(|target| target.target_id > cursor);
+    }
+    let has_more = all_targets.len() > limit as usize;
+    all_targets.truncate(limit as usize);
+    let selected: std::collections::HashSet<&str> = all_targets
+        .iter()
+        .map(|target| target.target_id.as_str())
+        .collect();
+    let next_cursor = has_more.then(|| {
+        hex::encode(
+            all_targets
+                .last()
+                .map(|target| target.target_id.as_bytes())
+                .unwrap_or_default(),
+        )
+    });
+
+    let mut groups: Vec<GroupResponse> = target_map
         .into_iter()
-        .map(|(group_path, targets)| GroupResponse {
-            group_path,
-            targets,
+        .filter_map(|(group_path, mut targets)| {
+            targets.retain(|target| selected.contains(target.target_id.as_str()));
+            (!targets.is_empty()).then_some(GroupResponse {
+                group_path,
+                targets,
+            })
         })
         .collect();
+    groups.sort_by(|left, right| left.group_path.cmp(&right.group_path));
 
     Ok(Json(TargetsResponse {
         targets: all_targets,
         groups,
+        next_cursor,
     }))
 }
 
@@ -517,9 +577,12 @@ pub struct CheckDetail {
 pub async fn list_checks(
     State(state): State<AppState>,
     Path(target_id): Path<String>,
-) -> Result<Json<Vec<CheckSummary>>, ApiError> {
+    Query(query): Query<PageQuery>,
+) -> Result<Json<ChecksResponse>, ApiError> {
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
+    let limit = validate_limit(query.limit, 100)?;
+    let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, &target_id)
         .await
@@ -530,7 +593,7 @@ pub async fn list_checks(
         .await
         .map_err(internal_error)?;
 
-    let summaries: Vec<CheckSummary> = checks
+    let mut summaries: Vec<CheckSummary> = checks
         .iter()
         .map(|c| CheckSummary {
             check_id: c.check_id.clone(),
@@ -542,7 +605,31 @@ pub async fn list_checks(
         })
         .collect();
 
-    Ok(Json(summaries))
+    summaries.sort_by(|left, right| left.check_id.cmp(&right.check_id));
+    if let Some(cursor) = cursor {
+        summaries.retain(|check| check.check_id > cursor);
+    }
+    let has_more = summaries.len() > limit as usize;
+    summaries.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        hex::encode(
+            summaries
+                .last()
+                .map(|check| check.check_id.as_bytes())
+                .unwrap_or_default(),
+        )
+    });
+
+    Ok(Json(ChecksResponse {
+        checks: summaries,
+        next_cursor,
+    }))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChecksResponse {
+    pub checks: Vec<CheckSummary>,
+    pub next_cursor: Option<String>,
 }
 
 pub async fn get_check(
@@ -1301,6 +1388,31 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
     String::from_utf8(bytes).map_err(|_| bad_request("invalid cursor"))
 }
 
+fn decode_numeric_cursor(cursor: Option<&str>) -> Result<Option<i64>, ApiError> {
+    cursor
+        .map(decode_cursor)
+        .transpose()?
+        .map(|value| value.parse().map_err(|_| bad_request("invalid cursor")))
+        .transpose()
+}
+
+fn page_by_numeric_id<T>(
+    values: &mut Vec<T>,
+    limit: i64,
+    id: impl Fn(&T) -> i64,
+) -> Option<String> {
+    let has_more = values.len() > limit as usize;
+    values.truncate(limit as usize);
+    has_more.then(|| {
+        hex::encode(
+            values
+                .last()
+                .map(|value| id(value).to_string())
+                .unwrap_or_default(),
+        )
+    })
+}
+
 fn timestamp_millis(value: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.timestamp_millis())
@@ -1350,21 +1462,66 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
 
 pub async fn list_groups(
     State(state): State<AppState>,
-) -> Result<Json<Vec<GroupResponse>>, ApiError> {
-    Ok(Json(list_targets(State(state)).await?.0.groups))
+    Query(query): Query<PageQuery>,
+) -> Result<Json<GroupsResponse>, ApiError> {
+    let limit = validate_limit(query.limit, 100)?;
+    let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
+    let all_targets = list_targets(
+        State(state),
+        Query(PageQuery {
+            limit: Some(200),
+            cursor: None,
+        }),
+    )
+    .await?
+    .0;
+    let mut groups = all_targets.groups;
+    groups.sort_by(|left, right| left.group_path.cmp(&right.group_path));
+    if let Some(cursor) = cursor {
+        groups.retain(|group| group.group_path > cursor);
+    }
+    let has_more = groups.len() > limit as usize;
+    groups.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        hex::encode(
+            groups
+                .last()
+                .map(|group| group.group_path.as_bytes())
+                .unwrap_or_default(),
+        )
+    });
+    Ok(Json(GroupsResponse {
+        groups,
+        next_cursor,
+    }))
 }
 
 pub async fn get_group(
     State(state): State<AppState>,
     Path(group_path): Path<String>,
 ) -> Result<Json<GroupResponse>, ApiError> {
-    let groups = list_groups(State(state)).await?.0;
+    let groups = list_groups(
+        State(state),
+        Query(PageQuery {
+            limit: Some(200),
+            cursor: None,
+        }),
+    )
+    .await?
+    .0
+    .groups;
     let decoded = group_path.trim_matches('/');
     groups
         .into_iter()
         .find(|group| group.group_path == decoded)
         .map(Json)
         .ok_or_else(|| not_found("group_not_found", "The requested group does not exist"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupsResponse {
+    pub groups: Vec<GroupResponse>,
+    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]
@@ -1482,5 +1639,21 @@ mod tests {
             .collect();
         assert_eq!(bin_reps_ms.len(), kemuri_core::Histogram::num_bins());
         assert!(bin_reps_ms[0] > 0.0);
+    }
+
+    #[test]
+    fn numeric_cursor_pages_in_descending_order() {
+        let mut values = vec![9_i64, 8, 7];
+        let cursor = page_by_numeric_id(&mut values, 2, |value| *value);
+        assert_eq!(values, vec![9, 8]);
+        assert_eq!(decode_numeric_cursor(cursor.as_deref()).unwrap(), Some(8));
+    }
+
+    #[test]
+    fn collection_limit_is_bounded() {
+        assert_eq!(validate_limit(Some(1), 50).unwrap(), 1);
+        assert_eq!(validate_limit(Some(200), 50).unwrap(), 200);
+        assert!(validate_limit(Some(0), 50).is_err());
+        assert!(validate_limit(Some(201), 50).is_err());
     }
 }

@@ -164,6 +164,12 @@ curl --fail --silent "http://127.0.0.1:$port/api/openapi.json" | jq -e '.openapi
 curl --fail --silent "http://127.0.0.1:$port/api/v1/targets?limit=1" | jq -e '.targets | length <= 1' >/dev/null
 test "$(curl --silent --output "$tmp/limit-error" --write-out '%{http_code}' "http://127.0.0.1:$port/api/v1/targets?limit=0")" = 400
 jq -e '.code == "bad_request" and .request_id' "$tmp/limit-error" >/dev/null
+test "$(curl --silent --dump-header "$tmp/query-headers" --output "$tmp/query-error" \
+  --write-out '%{http_code}' "http://127.0.0.1:$port/api/v1/targets?limit=invalid")" = 400
+query_request_id="$(jq -r 'select(.code == "bad_request") | .request_id' "$tmp/query-error")"
+test -n "$query_request_id"
+test "$(awk 'tolower($1) == "x-request-id:" { gsub("\r", "", $2); print $2 }' \
+  "$tmp/query-headers")" = "$query_request_id"
 curl --fail --silent "http://127.0.0.1:$port/api/v1/alerts?limit=1" | jq -e '.alerts | type == "array"' >/dev/null
 curl --fail --silent "http://127.0.0.1:$port/api/v1/alert-events?limit=1" | jq -e '.events | type == "array"' >/dev/null
 curl --silent --dump-header "$tmp/cors-headers" --output /dev/null \
@@ -197,6 +203,58 @@ done
 test "$(wc -l <"$tmp/webhooks")" -ge 2
 jq -s -e 'map(.event_type) | index("firing") != null and index("resolved") != null' \
   "$tmp/webhooks" >/dev/null
+
+revision_window_start_ms=0
+yq -i '(.targets[] | select(.id == "fixtures").checks[] | select(.id == "http").enabled) = false' \
+  "$tmp/kemuri.yaml"
+curl --fail --silent -X POST -H 'Content-Type: application/json' -d '{}' \
+  "http://127.0.0.1:$port/api/v1/config/reload" >/dev/null
+curl --fail --silent "http://127.0.0.1:$port/api/v1/targets/fixtures/checks" \
+  | jq -e 'all(.checks[]; .check_id != "http")' >/dev/null
+test "$(sqlite3 "$tmp/kemuri.db" \
+  "SELECT active FROM check_assignments WHERE check_internal_id = (
+     SELECT c.internal_id FROM checks c JOIN targets t ON t.internal_id = c.target_internal_id
+     WHERE t.target_id = 'fixtures' AND c.check_id = 'http'
+   )")" = 0
+sleep 0.5
+disabled_rounds="$(sqlite3 "$tmp/kemuri.db" \
+  "SELECT count(*) FROM rounds WHERE check_internal_id = (
+     SELECT c.internal_id FROM checks c JOIN targets t ON t.internal_id = c.target_internal_id
+     WHERE t.target_id = 'fixtures' AND c.check_id = 'http'
+   )")"
+sleep 2
+test "$(sqlite3 "$tmp/kemuri.db" \
+  "SELECT count(*) FROM rounds WHERE check_internal_id = (
+     SELECT c.internal_id FROM checks c JOIN targets t ON t.internal_id = c.target_internal_id
+     WHERE t.target_id = 'fixtures' AND c.check_id = 'http'
+   )")" = "$disabled_rounds"
+
+yq -i '(.targets[] | select(.id == "fixtures").checks[] | select(.id == "http").enabled) = true' \
+  "$tmp/kemuri.yaml"
+yq -i '(.targets[] | select(.id == "fixtures").checks[] | select(.id == "http").timeout) = "1900ms"' \
+  "$tmp/kemuri.yaml"
+curl --fail --silent -X POST -H 'Content-Type: application/json' -d '{}' \
+  "http://127.0.0.1:$port/api/v1/config/reload" >/dev/null
+for _ in $(seq 1 50); do
+  current_rounds="$(sqlite3 "$tmp/kemuri.db" \
+    "SELECT count(*) FROM rounds WHERE check_internal_id = (
+       SELECT c.internal_id FROM checks c JOIN targets t ON t.internal_id = c.target_internal_id
+       WHERE t.target_id = 'fixtures' AND c.check_id = 'http'
+     )")"
+  test "$current_rounds" -gt "$disabled_rounds" && break
+  sleep 0.2
+done
+test "$current_rounds" -gt "$disabled_rounds"
+test "$(sqlite3 "$tmp/kemuri.db" \
+  "SELECT active FROM check_assignments WHERE check_internal_id = (
+     SELECT c.internal_id FROM checks c JOIN targets t ON t.internal_id = c.target_internal_id
+     WHERE t.target_id = 'fixtures' AND c.check_id = 'http'
+   )")" = 1
+revision_window_end_ms="$(( $(date +%s) * 1000 + 1000 ))"
+curl --fail --silent \
+  "http://127.0.0.1:$port/api/v1/targets/fixtures/checks/http/series?from_ms=$revision_window_start_ms&to_ms=$revision_window_end_ms&max_points=100" \
+  | jq -e '.revision_markers | length >= 2' >/dev/null
+cp "$tmp/kemuri.yaml" "$tmp/valid.yaml"
 
 for _ in 1 2; do
   curl --fail --silent -X POST -H 'Content-Type: application/json' -d '{}' \

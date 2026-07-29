@@ -4,6 +4,11 @@ Latency monitoring with smoke-style graphs.
 
 Documentation: [stianfro.github.io/kemuri](https://stianfro.github.io/kemuri/)
 
+Kemuri is an independent implementation inspired by
+[SmokePing](https://oss.oetiker.ch/smokeping/). Kemuri does not contain
+SmokePing source code and is not affiliated with the SmokePing project. See
+[PROVENANCE.md](PROVENANCE.md) for source and dependency rules.
+
 ## Quick Start
 
 Build:
@@ -159,4 +164,5 @@ docker run --cap-add NET_RAW ...
 
 ## License
 
-MIT
+Copyright (c) 2026 Stian Frøystein. Kemuri is available under the MIT License.
+See [LICENSE](LICENSE).

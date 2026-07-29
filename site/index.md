@@ -94,3 +94,14 @@ curl --proto '=https' --tlsv1.2 -LsSf \
     it behind a trusted reverse proxy when other users can reach the host.
   </p>
 </section>
+
+<section class="home-section">
+  <h2>Relationship to SmokePing</h2>
+  <p class="home-section__intro">
+    Kemuri is an independent implementation inspired by
+    <a href="https://oss.oetiker.ch/smokeping/">SmokePing</a>. Kemuri does not
+    contain SmokePing source code and is not affiliated with the SmokePing
+    project. Read the <a href="./project/provenance">source provenance</a> for
+    the source and dependency rules.
+  </p>
+</section>

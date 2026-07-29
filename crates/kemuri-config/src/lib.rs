@@ -141,16 +141,24 @@ impl KemuriConfig {
                         format!("references unknown notifier: {}", rule.notifier),
                     ));
                 }
-                parse_duration(&rule.window).map_err(|e| {
+                let window = parse_duration(&rule.window).map_err(|e| {
                     ConfigError::validation(format!("rules.{}.window", id), e.to_string())
                 })?;
+                if window.is_zero() {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.window", id),
+                        "must be greater than zero",
+                    ));
+                }
                 if ![
                     "measurement_loss_ratio",
                     "health_failure_ratio",
                     "healthy_sample_ratio",
-                    "consecutive_total_loss",
-                    "consecutive_unhealthy",
-                    "latency",
+                    "consecutive_total_loss_rounds",
+                    "consecutive_unhealthy_rounds",
+                    "p50_latency",
+                    "p95_latency",
+                    "p99_latency",
                     "no_data",
                 ]
                 .contains(&rule.metric.as_str())
@@ -160,11 +168,31 @@ impl KemuriConfig {
                         "unsupported alert metric",
                     ));
                 }
-                if !["gt", "gte", "lt", "lte", "eq"].contains(&rule.operator.as_str()) {
+                if !["gt", "gte", "lt", "lte"].contains(&rule.operator.as_str()) {
                     return Err(ConfigError::validation(
                         format!("rules.{}.operator", id),
                         "unsupported alert operator",
                     ));
+                }
+                if let Some(operator) = rule.clear_operator.as_deref()
+                    && !["gt", "gte", "lt", "lte"].contains(&operator)
+                {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.clear_operator", id),
+                        "unsupported alert operator",
+                    ));
+                }
+                validate_alert_threshold(
+                    &rule.threshold,
+                    &rule.metric,
+                    &format!("rules.{}.threshold", id),
+                )?;
+                if let Some(threshold) = rule.clear_threshold.as_deref() {
+                    validate_alert_threshold(
+                        threshold,
+                        &rule.metric,
+                        &format!("rules.{}.clear_threshold", id),
+                    )?;
                 }
                 for (field, value) in [
                     ("duration", rule.duration.as_deref()),
@@ -185,6 +213,18 @@ impl KemuriConfig {
                             ));
                         }
                     }
+                }
+                if rule.minimum_rounds == Some(0) {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.minimum_rounds", id),
+                        "must be greater than zero",
+                    ));
+                }
+                if rule.minimum_latency_samples == Some(0) {
+                    return Err(ConfigError::validation(
+                        format!("rules.{}.minimum_latency_samples", id),
+                        "must be greater than zero",
+                    ));
                 }
             }
         }
@@ -702,6 +742,34 @@ fn parse_percentage_value(value: &str, path: &str) -> Result<f64, ConfigError> {
         return Err(ConfigError::validation(path, "must be between 0% and 100%"));
     }
     Ok(number / 100.0)
+}
+
+fn validate_alert_threshold(value: &str, metric: &str, path: &str) -> Result<(), ConfigError> {
+    if matches!(
+        metric,
+        "measurement_loss_ratio" | "health_failure_ratio" | "healthy_sample_ratio"
+    ) {
+        parse_percentage_value(value, path)?;
+        return Ok(());
+    }
+    if matches!(metric, "p50_latency" | "p95_latency" | "p99_latency") {
+        let duration = parse_duration(value)
+            .map_err(|error| ConfigError::validation(path, error.to_string()))?;
+        if duration.is_zero() {
+            return Err(ConfigError::validation(path, "must be greater than zero"));
+        }
+        return Ok(());
+    }
+    let number = value
+        .parse::<f64>()
+        .map_err(|_| ConfigError::validation(path, "must be a finite number"))?;
+    if !number.is_finite() || number < 0.0 {
+        return Err(ConfigError::validation(
+            path,
+            "must be a finite number greater than or equal to zero",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1829,6 +1897,57 @@ rules:
         let config: KemuriConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("unknown notifier"));
+    }
+
+    #[test]
+    fn alert_validation_matches_runtime_metrics_and_operators() {
+        let template = r#"
+version: 1
+profiles:
+  - kind: icmp
+    id: p1
+notifiers:
+  - kind: webhook
+    id: n1
+    url: http://example.com
+rules:
+  - id: r1
+    profile: p1
+    metric: METRIC
+    operator: OPERATOR
+    threshold: "1"
+    window: WINDOW
+    notifier: n1
+"#;
+        for metric in [
+            "consecutive_total_loss_rounds",
+            "consecutive_unhealthy_rounds",
+            "no_data",
+        ] {
+            let config = KemuriConfig::parse(
+                &template
+                    .replace("METRIC", metric)
+                    .replace("OPERATOR", "gte")
+                    .replace("WINDOW", "1m"),
+            );
+            assert!(config.is_ok(), "{metric} must be accepted");
+        }
+        for (metric, operator, window) in [
+            ("consecutive_unhealthy", "gte", "1m"),
+            ("consecutive_unhealthy_rounds", "eq", "1m"),
+            ("consecutive_unhealthy_rounds", "gte", "0s"),
+        ] {
+            let config = KemuriConfig::parse(
+                &template
+                    .replace("METRIC", metric)
+                    .replace("OPERATOR", operator)
+                    .replace("WINDOW", window),
+            );
+            assert!(
+                config.is_err(),
+                "{metric}/{operator}/{window} must be rejected"
+            );
+        }
     }
 
     #[test]

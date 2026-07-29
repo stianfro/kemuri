@@ -1,6 +1,7 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import type { SeriesPoint, SeriesResponse } from '../api';
-import { formatTime } from '../time';
+import { formatAxisTime, formatTime } from '../time';
+import { useLiveRefresh } from '../live';
 
 const STRIP_HEIGHT = 16;
 const PADDING = { top: 20, right: 20, bottom: 40, left: 60 };
@@ -39,12 +40,14 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
   const [logScale, setLogScale] = useState(true);
   const [rangeMs, setRangeMs] = useState(3600000);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
-  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 400 });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const liveRevision = useLiveRefresh();
 
   const loadData = useCallback(async () => {
+    if (canvasSize.width === 0) return;
     const to = new Date();
     const from = new Date(to.getTime() - rangeMs);
-    const maxPoints = Math.max(100, Math.floor(canvasSize.width / 2));
+    const maxPoints = Math.max(60, Math.min(240, Math.floor(canvasSize.width / 10)));
     try {
       const result = await fetchSeries(
         targetId,
@@ -58,24 +61,29 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load series data');
     }
-  }, [targetId, checkId, rangeMs, canvasSize.width, fetchSeries]);
+  }, [targetId, checkId, rangeMs, canvasSize.width, fetchSeries, liveRevision]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    const resize = (width: number) => {
+      const nextWidth = Math.max(240, Math.floor(width));
+      const nextHeight = Math.max(280, Math.min(480, Math.floor(nextWidth * 0.5)));
+      setCanvasSize((current) =>
+        current.width === nextWidth && current.height === nextHeight
+          ? current
+          : { width: nextWidth, height: nextHeight },
+      );
+    };
+    resize(container.getBoundingClientRect().width);
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width } = entry.contentRect;
-        setCanvasSize({
-          width: Math.max(400, Math.floor(width)),
-          height: Math.max(300, Math.floor(width * 0.5)),
-        });
-      }
+      const entry = entries[0];
+      if (entry) resize(entry.contentRect.width);
     });
     observer.observe(container);
     return () => observer.disconnect();
@@ -348,12 +356,16 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     ctx.fillStyle = textColor;
     ctx.font = '11px system-ui';
     ctx.textAlign = 'center';
-    const xLabelCount = Math.min(8, points.length);
+    const xLabelCount = Math.min(
+      Math.max(2, Math.floor(plotW / 100)),
+      8,
+      points.length,
+    );
     const xStep = Math.max(1, Math.floor(points.length / xLabelCount));
     for (let i = 0; i < points.length; i += xStep) {
       const x = PADDING.left + i * cellW + cellW / 2;
       const pt = points[i];
-      const label = pt ? formatTime(pt.timestamp).split(' ').pop() || '' : '';
+      const label = pt ? formatAxisTime(pt.timestamp) : '';
       ctx.fillText(label, x, canvasSize.height - PADDING.bottom + 20);
     }
   }, [data, canvasSize, logScale]);
@@ -463,15 +475,17 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
 
       {error && <div style={{ color: '#ef4444', fontSize: 13 }}>{error}</div>}
 
-      <div style={{ position: 'relative' }}>
-        <canvas
-          ref={canvasRef}
-          role="img"
-          aria-label={graphSummary}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
-          style={{ display: 'block', borderRadius: 4 }}
-        />
+      <div style={{ position: 'relative', width: '100%', minWidth: 0 }}>
+        {canvasSize.width > 0 && (
+          <canvas
+            ref={canvasRef}
+            role="img"
+            aria-label={graphSummary}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            style={{ display: 'block', width: '100%', borderRadius: 4 }}
+          />
+        )}
         <p
           style={{
             position: 'absolute',
@@ -553,6 +567,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
         style={{
           display: 'flex',
           gap: 16,
+          flexWrap: 'wrap',
           marginTop: 6,
           fontSize: 11,
           color: 'var(--text-muted)',

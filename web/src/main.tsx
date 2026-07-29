@@ -8,6 +8,8 @@ import { System } from './pages/System';
 import { Group } from './pages/Group';
 import { fetchAlerts } from './api';
 import { useEffect, useState } from 'react';
+import { requestLiveRefresh, useLiveRefresh } from './live';
+import './styles.css';
 
 function NavBar({
   timeZone,
@@ -18,6 +20,7 @@ function NavBar({
 }) {
   const location = useLocation();
   const [alertCount, setAlertCount] = useState(0);
+  const liveRevision = useLiveRefresh();
 
   useEffect(() => {
     fetchAlerts({ state: 'firing,pending_fire' })
@@ -29,7 +32,7 @@ function NavBar({
         .catch(() => {});
     }, 30000);
     return () => clearInterval(id);
-  }, []);
+  }, [liveRevision]);
 
   const links = [
     { to: '/', label: 'Overview' },
@@ -129,7 +132,7 @@ function SystemEventBridge() {
     let refresh: number | undefined;
     const scheduleRefresh = () => {
       window.clearTimeout(refresh);
-      refresh = window.setTimeout(() => window.location.reload(), 250);
+      refresh = window.setTimeout(requestLiveRefresh, 250);
     };
     for (const eventType of [
       'round.completed',
@@ -219,7 +222,15 @@ function App() {
       <BrowserRouter>
         <SystemEventBridge />
         <NavBar timeZone={timeZone} onTimeZoneChange={setTimeZone} />
-        <div style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
+        <div
+          style={{
+            width: '100%',
+            maxWidth: 1200,
+            minWidth: 0,
+            margin: '0 auto',
+            padding: '24px 16px',
+          }}
+        >
           <Routes>
             <Route path="/" element={<Overview />} />
             <Route path="/targets/:targetId" element={<Target />} />

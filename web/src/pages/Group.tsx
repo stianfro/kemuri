@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from '../router';
 import { fetchGroup } from '../api';
 import type { GroupResponse } from '../api';
+import { useLiveRefresh } from '../live';
 
 export function Group() {
   const { groupPath = '' } = useParams<{ groupPath: string }>();
   const [group, setGroup] = useState<GroupResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   useEffect(() => {
     setGroup(null);
@@ -14,7 +16,7 @@ export function Group() {
     fetchGroup(groupPath).then(setGroup).catch((reason: unknown) => {
       setError(reason instanceof Error ? reason.message : 'Could not load this group.');
     });
-  }, [groupPath]);
+  }, [groupPath, liveRevision]);
 
   if (error) return <p role="alert">{error}</p>;
   if (!group) return <p aria-live="polite">Loading group...</p>;

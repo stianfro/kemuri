@@ -1,5 +1,6 @@
 import React from 'react';
 import { fetchInfo, fetchSystemStatus, type BuildInfo, type SystemStatus } from '../api';
+import { useLiveRefresh } from '../live';
 import { formatTime } from '../time';
 
 function formatBytes(bytes: number): string {
@@ -68,6 +69,7 @@ export function System() {
   const [info, setInfo] = React.useState<BuildInfo | null>(null);
   const [status, setStatus] = React.useState<SystemStatus | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   React.useEffect(() => {
     fetchInfo().then(setInfo).catch((e) => setError(e.message));
@@ -76,7 +78,7 @@ export function System() {
       fetchSystemStatus().then(setStatus).catch(() => {});
     }, 10000);
     return () => clearInterval(id);
-  }, []);
+  }, [liveRevision]);
 
   if (error) return <div style={{ color: 'var(--danger)' }}>Error: {error}</div>;
   if (!info || !status) return <div>Loading system info...</div>;

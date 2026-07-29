@@ -7,6 +7,7 @@ import {
   type AlertEvent,
 } from '../api';
 import { formatTime } from '../time';
+import { useLiveRefresh } from '../live';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -58,6 +59,7 @@ export function Alerts() {
   const [events, setEvents] = React.useState<AlertEvent[]>([]);
   const [stateFilter, setStateFilter] = React.useState<string>('firing,pending_fire');
   const [error, setError] = React.useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   React.useEffect(() => {
     fetchAlerts({ state: stateFilter || undefined })
@@ -66,7 +68,7 @@ export function Alerts() {
     fetchAlertEvents({ limit: 50 })
       .then((r) => setEvents(r.events))
       .catch(() => {});
-  }, [stateFilter]);
+  }, [stateFilter, liveRevision]);
 
   if (error) return <div style={{ color: 'var(--danger)' }}>Error: {error}</div>;
 

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link, useParams } from '../router';
 import { fetchTarget, type TargetDetail, type CheckSummary } from '../api';
+import { useLiveRefresh } from '../live';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -41,13 +42,14 @@ export function Target() {
   const { targetId } = useParams<{ targetId: string }>();
   const [data, setData] = React.useState<TargetDetail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   React.useEffect(() => {
     if (!targetId) return;
     fetchTarget(targetId)
       .then(setData)
       .catch((e) => setError(e.message));
-  }, [targetId]);
+  }, [targetId, liveRevision]);
 
   if (error) return <div style={{ color: 'var(--danger)' }}>Error: {error}</div>;
   if (!data) return <div>Loading target...</div>;

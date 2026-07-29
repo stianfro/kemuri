@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from '../router';
 import { fetchTargets, fetchAlerts, type TargetsResponse, type GroupResponse, type TargetSummary } from '../api';
+import { useLiveRefresh } from '../live';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -51,6 +52,7 @@ export function Overview() {
   const [data, setData] = React.useState<TargetsResponse | null>(null);
   const [alertCount, setAlertCount] = React.useState<number>(0);
   const [error, setError] = React.useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   React.useEffect(() => {
     fetchTargets()
@@ -59,7 +61,7 @@ export function Overview() {
     fetchAlerts({ state: 'firing,pending_fire' })
       .then((r) => setAlertCount(r.alerts.length))
       .catch(() => {});
-  }, []);
+  }, [liveRevision]);
 
   if (error) return <div style={{ color: 'var(--danger)' }}>Error: {error}</div>;
   if (!data) return <div>Loading targets...</div>;

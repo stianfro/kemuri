@@ -11,6 +11,7 @@ import {
 } from '../api';
 import { SmokeGraph } from '../components/SmokeGraph';
 import { formatTime } from '../time';
+import { useLiveRefresh } from '../live';
 
 function stateColor(state: string): string {
   const colors: Record<string, string> = {
@@ -72,6 +73,7 @@ export function Check() {
   const [rounds, setRounds] = React.useState<RoundSummary[]>([]);
   const [activeAlerts, setActiveAlerts] = React.useState<AlertState[]>([]);
   const [error, setError] = React.useState<string | null>(null);
+  const liveRevision = useLiveRefresh();
 
   React.useEffect(() => {
     if (!targetId || !checkId) return;
@@ -84,7 +86,7 @@ export function Check() {
     fetchAlerts({ target_id: targetId, check_id: checkId, state: 'firing,pending_fire' })
       .then((r) => setActiveAlerts(r.alerts))
       .catch(() => {});
-  }, [targetId, checkId]);
+  }, [targetId, checkId, liveRevision]);
 
   if (error) return <div style={{ color: 'var(--danger)' }}>Error: {error}</div>;
   if (!check) return <div>Loading check...</div>;

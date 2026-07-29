@@ -69,6 +69,7 @@ pub struct AppState {
     pub last_reload: Arc<std::sync::RwLock<Option<ReloadStatus>>>,
     pub reload_tx: mpsc::Sender<()>,
     pub disk_ready: Arc<AtomicBool>,
+    pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -334,6 +335,7 @@ pub async fn serve(
 
     let last_reload = Arc::new(std::sync::RwLock::new(None::<ReloadStatus>));
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(4);
 
     let state = AppState {
         build_info: Arc::new(build_info),
@@ -347,6 +349,7 @@ pub async fn serve(
         last_reload: last_reload.clone(),
         reload_tx: reload_tx.clone(),
         disk_ready,
+        shutdown_tx: shutdown_tx.clone(),
     };
 
     let config_path_arc = state.config_path.clone();
@@ -362,35 +365,37 @@ pub async fn serve(
         .await
         .map_err(|e| ServerError::Bind(e.to_string()))?;
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    let mut sigterm_rx = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| ServerError::Serve(e.to_string()))?;
-    let mut sighup_rx = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|e| ServerError::Serve(e.to_string()))?;
-
     let shutdown_tx_sigint = shutdown_tx.clone();
-    let shutdown_tx_sigterm = shutdown_tx.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         let _ = shutdown_tx_sigint.send(());
     });
 
-    tokio::spawn(async move {
-        let _ = sigterm_rx.recv().await;
-        let _ = shutdown_tx_sigterm.send(());
-    });
-
-    tokio::spawn(async move {
-        loop {
-            let _ = sighup_rx.recv().await;
-            let _ = reload_tx.send(()).await;
-        }
-    });
+    #[cfg(unix)]
+    {
+        let mut sigterm_rx =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| ServerError::Serve(e.to_string()))?;
+        let mut sighup_rx = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(|e| ServerError::Serve(e.to_string()))?;
+        let shutdown_tx_sigterm = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let _ = sigterm_rx.recv().await;
+            let _ = shutdown_tx_sigterm.send(());
+        });
+        tokio::spawn(async move {
+            loop {
+                let _ = sighup_rx.recv().await;
+                let _ = reload_tx.send(()).await;
+            }
+        });
+    }
 
     let shutdown_timeout = kemuri_core::parse_duration(&config.server.shutdown_timeout)
         .unwrap_or(std::time::Duration::from_secs(30));
 
-    let mut shutdown_rx1 = shutdown_rx.resubscribe();
+    let mut shutdown_rx1 = shutdown_tx.subscribe();
+    let mut shutdown_rx_main = shutdown_tx.subscribe();
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx1.recv().await;
@@ -402,6 +407,7 @@ pub async fn serve(
     let result = loop {
         tokio::select! {
             result = &mut server => break result,
+            _ = shutdown_rx_main.recv() => break Ok(()),
             Some(component) = fatal_rx.recv() => {
                 tracing::error!(component, "required runtime task exited unexpectedly");
                 break Err(std::io::Error::other(format!(
@@ -432,20 +438,25 @@ pub async fn serve(
     let _ = worker_shutdown_tx.send(());
 
     let graceful = async {
+        let server_result = (&mut server).await;
         for worker in &mut worker_handles {
             let _ = worker.await;
         }
         let _ = (&mut writer_handle).await;
+        server_result
     };
-    if tokio::time::timeout(shutdown_timeout, graceful)
-        .await
-        .is_err()
-    {
-        tracing::warn!("graceful shutdown deadline exceeded");
-        for worker in &worker_handles {
-            worker.abort();
+    match tokio::time::timeout(shutdown_timeout, graceful).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "HTTP server failed during shutdown");
         }
-        writer_handle.abort();
+        Err(_) => {
+            tracing::warn!("graceful shutdown deadline exceeded");
+            for worker in &worker_handles {
+                worker.abort();
+            }
+            writer_handle.abort();
+        }
     }
 
     tracing::info!("kemuri server stopped");
@@ -816,21 +827,28 @@ async fn events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.event_tx.subscribe();
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    return Some((Ok(event.to_sse_event()), rx));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return None;
+    let shutdown_rx = state.shutdown_tx.subscribe();
+    let stream =
+        futures::stream::unfold((rx, shutdown_rx), |(mut rx, mut shutdown_rx)| async move {
+            loop {
+                tokio::select! {
+                    event = rx.recv() => match event {
+                        Ok(event) => {
+                            return Some((Ok(event.to_sse_event()), (rx, shutdown_rx)));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return None;
+                        }
+                    },
+                    _ = shutdown_rx.recv() => {
+                        return None;
+                    }
                 }
             }
-        }
-    });
+        });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

@@ -14,6 +14,8 @@ sed \
   -e "s#port: 8080#port: $port\\n  shutdown_timeout: 3s#" \
   -e "s#127.0.0.1:8080#127.0.0.1:$port#" \
   -e "s#/var/lib/kemuri/kemuri.db#$tmp/kemuri.db#" \
+  -e "s#warning_free: 10%#warning_free: 0.5%#" \
+  -e "s#critical_free: 5%#critical_free: 0.1%#" \
   "$root/packaging/kemuri.yaml" >"$tmp/kemuri.yaml"
 cp "$tmp/kemuri.yaml" "$tmp/valid.yaml"
 
@@ -51,8 +53,14 @@ sleep 0.2
 curl --fail --silent "http://127.0.0.1:$port/readyz" >/dev/null
 cp "$tmp/valid.yaml" "$tmp/kemuri.yaml"
 
+curl --no-buffer --silent "http://127.0.0.1:$port/api/v1/events" >"$tmp/events" &
+events_pid=$!
+sleep 0.2
+shutdown_started=$SECONDS
 lsof -ti :$port -sTCP:LISTEN | xargs kill
 wait "$server_pid"
+wait "$events_pid"
+test "$((SECONDS - shutdown_started))" -le 5
 "$binary" doctor --config "$tmp/kemuri.yaml"
 "$binary" database backup --config "$tmp/kemuri.yaml" --output - >"$tmp/backup.sqlite"
 test "$(sqlite3 "$tmp/backup.sqlite" 'PRAGMA integrity_check')" = ok

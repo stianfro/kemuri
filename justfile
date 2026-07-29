@@ -54,7 +54,7 @@ test-container:
     docker build -f packaging/container/Dockerfile -t kemuri:test .
 
 test-load:
-    cargo test -p kemuri-server scheduler
+    cargo test -p kemuri-server --test load
 
 bench:
     cargo bench --workspace --no-run

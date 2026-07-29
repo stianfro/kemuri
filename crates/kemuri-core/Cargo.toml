@@ -12,4 +12,9 @@ thiserror = { workspace = true }
 workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true }
 serde_yaml = { workspace = true }
+
+[[bench]]
+name = "core"
+harness = false

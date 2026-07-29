@@ -102,6 +102,20 @@ pub struct AlertsListResponse {
     pub next_cursor: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct JoinedAlertState {
+    internal_id: i64,
+    rule_id: String,
+    target_id: String,
+    check_id: String,
+    state: String,
+    state_entered_at: String,
+    first_condition_true_at: Option<String>,
+    last_evaluated_at: Option<String>,
+    last_notification_at: Option<String>,
+    last_metric_value: Option<f64>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/alerts",
@@ -116,62 +130,60 @@ pub async fn list_alerts(
     State(state): State<AppState>,
     Query(query): Query<AlertsQuery>,
 ) -> Result<Json<AlertsListResponse>, ApiError> {
-    let pool = state.pool.clone();
     let limit = validate_limit(query.limit, 100)?;
     let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
-
-    let alerts = if let Some(ref rule_id) = query.rule_id {
-        kemuri_storage::AlertStateRepo::list_by_rule_id(&pool, rule_id)
-            .await
-            .map_err(internal_error)?
-    } else if let Some(ref state_filter) = query.state {
-        let states: Vec<&str> = state_filter.split(',').collect();
-        kemuri_storage::AlertStateRepo::list_by_state(&pool, &states)
-            .await
-            .map_err(internal_error)?
-    } else {
-        kemuri_storage::AlertStateRepo::list_all(&pool)
-            .await
-            .map_err(internal_error)?
-    };
-
-    let mut responses = Vec::new();
-    for alert in &alerts {
-        let check = kemuri_storage::CheckRepo::get_by_internal_id(&pool, alert.check_internal_id)
-            .await
-            .map_err(internal_error)?;
-
-        let (target_id, check_id) = match check {
-            Some(c) => {
-                let target =
-                    kemuri_storage::TargetRepo::get_by_internal_id(&pool, c.target_internal_id)
-                        .await
-                        .map_err(internal_error)?;
-                (
-                    target.map(|t| t.target_id.clone()).unwrap_or_default(),
-                    c.check_id.clone(),
-                )
-            }
-            None => (String::new(), String::new()),
-        };
-
-        if let Some(ref filter_target_id) = query.target_id
-            && target_id != *filter_target_id
-        {
-            continue;
+    let mut sql = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT a.internal_id, a.rule_id, t.target_id, c.check_id, a.state,
+                a.state_entered_at, a.first_condition_true_at, a.last_evaluated_at,
+                a.last_notification_at, a.last_metric_value
+         FROM alert_states a
+         JOIN checks c ON c.internal_id = a.check_internal_id
+         JOIN targets t ON t.internal_id = c.target_internal_id
+         WHERE 1 = 1",
+    );
+    if let Some(rule_id) = query.rule_id.as_deref() {
+        sql.push(" AND a.rule_id = ").push_bind(rule_id);
+    }
+    if let Some(state_filter) = query.state.as_deref() {
+        let states: Vec<_> = state_filter
+            .split(',')
+            .map(str::trim)
+            .filter(|state| !state.is_empty())
+            .collect();
+        if states.is_empty() {
+            return Err(bad_request("state must contain at least one value"));
         }
-        if let Some(ref filter_check_id) = query.check_id
-            && check_id != *filter_check_id
-        {
-            continue;
+        sql.push(" AND a.state IN (");
+        let mut separated = sql.separated(", ");
+        for state in states {
+            separated.push_bind(state);
         }
-
-        responses.push(AlertStateResponse {
+        separated.push_unseparated(")");
+    }
+    if let Some(target_id) = query.target_id.as_deref() {
+        sql.push(" AND t.target_id = ").push_bind(target_id);
+    }
+    if let Some(check_id) = query.check_id.as_deref() {
+        sql.push(" AND c.check_id = ").push_bind(check_id);
+    }
+    if let Some(cursor) = cursor {
+        sql.push(" AND a.internal_id < ").push_bind(cursor);
+    }
+    sql.push(" ORDER BY a.internal_id DESC LIMIT ")
+        .push_bind(limit + 1);
+    let rows: Vec<JoinedAlertState> = sql
+        .build_query_as()
+        .fetch_all(&state.pool)
+        .await
+        .map_err(internal_error)?;
+    let mut responses: Vec<_> = rows
+        .into_iter()
+        .map(|alert| AlertStateResponse {
             internal_id: alert.internal_id,
-            rule_id: alert.rule_id.clone(),
-            target_id,
-            check_id,
-            state: alert.state.clone(),
+            rule_id: alert.rule_id,
+            target_id: alert.target_id,
+            check_id: alert.check_id,
+            state: alert.state,
             state_entered_ms: timestamp_millis(&alert.state_entered_at),
             first_condition_true_ms: alert
                 .first_condition_true_at
@@ -180,15 +192,9 @@ pub async fn list_alerts(
             last_evaluated_ms: alert.last_evaluated_at.as_deref().map(timestamp_millis),
             last_notification_ms: alert.last_notification_at.as_deref().map(timestamp_millis),
             last_metric_value: alert.last_metric_value,
-        });
-    }
-
-    responses.sort_by_key(|alert| std::cmp::Reverse(alert.internal_id));
-    if let Some(cursor) = cursor {
-        responses.retain(|alert| alert.internal_id < cursor);
-    }
+        })
+        .collect();
     let next_cursor = page_by_numeric_id(&mut responses, limit, |alert| alert.internal_id);
-
     Ok(Json(AlertsListResponse {
         alerts: responses,
         next_cursor,
@@ -288,6 +294,20 @@ pub struct AlertEventsResponse {
     pub next_cursor: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct JoinedAlertEvent {
+    internal_id: i64,
+    rule_id: String,
+    target_id: String,
+    check_id: String,
+    event_type: String,
+    from_state: String,
+    to_state: String,
+    metric_value: Option<f64>,
+    threshold_value: Option<f64>,
+    occurred_at: String,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/alert-events",
@@ -302,94 +322,59 @@ pub async fn list_alert_events(
     State(state): State<AppState>,
     Query(query): Query<AlertEventsQuery>,
 ) -> Result<Json<AlertEventsResponse>, ApiError> {
-    let pool = state.pool.clone();
     let limit = validate_limit(query.limit, 100)?;
     let cursor = decode_numeric_cursor(query.cursor.as_deref())?;
-
-    let events = if let Some(ref rule_id) = query.rule_id {
-        kemuri_storage::AlertEventRepo::list_by_rule(&pool, rule_id, limit)
-            .await
-            .map_err(internal_error)?
-    } else if let Some(from_ms) = query.from_ms {
-        let from = parse_range_time(Some(from_ms), "from_ms")?.to_rfc3339();
-        let to =
-            parse_range_time(Some(query.to_ms.unwrap_or(4_102_444_800_000)), "to_ms")?.to_rfc3339();
-        let check_internal_id: i64 = if let Some(ref target_id) = query.target_id {
-            let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, target_id)
-                .await
-                .map_err(internal_error)?;
-            match target {
-                Some(t) => {
-                    if let Some(ref check_id) = query.check_id {
-                        kemuri_storage::CheckRepo::get(&pool, t.internal_id, check_id)
-                            .await
-                            .map_err(internal_error)?
-                            .map(|c| c.internal_id)
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    }
-                }
-                None => 0,
-            }
-        } else {
-            0
-        };
-        kemuri_storage::AlertEventRepo::list_by_check_range(
-            &pool,
-            check_internal_id,
-            &from,
-            &to,
-            limit,
-        )
+    let mut sql = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT e.internal_id, e.rule_id, t.target_id, c.check_id, e.event_type,
+                e.from_state, e.to_state, e.metric_value, e.threshold_value, e.occurred_at
+         FROM alert_events e
+         JOIN checks c ON c.internal_id = e.check_internal_id
+         JOIN targets t ON t.internal_id = c.target_internal_id
+         WHERE 1 = 1",
+    );
+    if let Some(rule_id) = query.rule_id.as_deref() {
+        sql.push(" AND e.rule_id = ").push_bind(rule_id);
+    }
+    if let Some(target_id) = query.target_id.as_deref() {
+        sql.push(" AND t.target_id = ").push_bind(target_id);
+    }
+    if let Some(check_id) = query.check_id.as_deref() {
+        sql.push(" AND c.check_id = ").push_bind(check_id);
+    }
+    if let Some(from_ms) = query.from_ms {
+        sql.push(" AND e.occurred_at >= ")
+            .push_bind(parse_range_time(Some(from_ms), "from_ms")?.to_rfc3339());
+    }
+    if let Some(to_ms) = query.to_ms {
+        sql.push(" AND e.occurred_at <= ")
+            .push_bind(parse_range_time(Some(to_ms), "to_ms")?.to_rfc3339());
+    }
+    if let Some(cursor) = cursor {
+        sql.push(" AND e.internal_id < ").push_bind(cursor);
+    }
+    sql.push(" ORDER BY e.internal_id DESC LIMIT ")
+        .push_bind(limit + 1);
+    let rows: Vec<JoinedAlertEvent> = sql
+        .build_query_as()
+        .fetch_all(&state.pool)
         .await
-        .map_err(internal_error)?
-    } else {
-        kemuri_storage::AlertEventRepo::list_recent(&pool, limit)
-            .await
-            .map_err(internal_error)?
-    };
-
-    let mut responses = Vec::new();
-    for event in &events {
-        let check = kemuri_storage::CheckRepo::get_by_internal_id(&pool, event.check_internal_id)
-            .await
-            .map_err(internal_error)?;
-
-        let (target_id, check_id) = match check {
-            Some(c) => {
-                let target =
-                    kemuri_storage::TargetRepo::get_by_internal_id(&pool, c.target_internal_id)
-                        .await
-                        .map_err(internal_error)?;
-                (
-                    target.map(|t| t.target_id.clone()).unwrap_or_default(),
-                    c.check_id.clone(),
-                )
-            }
-            None => (String::new(), String::new()),
-        };
-
-        responses.push(AlertEventResponse {
+        .map_err(internal_error)?;
+    let mut responses: Vec<_> = rows
+        .into_iter()
+        .map(|event| AlertEventResponse {
             internal_id: event.internal_id,
-            rule_id: event.rule_id.clone(),
-            target_id,
-            check_id,
-            event_type: event.event_type.clone(),
-            from_state: event.from_state.clone(),
-            to_state: event.to_state.clone(),
+            rule_id: event.rule_id,
+            target_id: event.target_id,
+            check_id: event.check_id,
+            event_type: event.event_type,
+            from_state: event.from_state,
+            to_state: event.to_state,
             metric_value: event.metric_value,
             threshold_value: event.threshold_value,
             timestamp_ms: timestamp_millis(&event.occurred_at),
-        });
-    }
-
-    responses.sort_by_key(|event| std::cmp::Reverse(event.internal_id));
-    if let Some(cursor) = cursor {
-        responses.retain(|event| event.internal_id < cursor);
-    }
+        })
+        .collect();
     let next_cursor = page_by_numeric_id(&mut responses, limit, |event| event.internal_id);
-
     Ok(Json(AlertEventsResponse {
         events: responses,
         next_cursor,

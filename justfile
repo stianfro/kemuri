@@ -42,7 +42,10 @@ test-api:
     just api-check
 
 test-web:
-    cd web && npm ci && npm run build
+    cd web && npm ci && npm test && npm run build
+
+test-browser:
+    bash packaging/tests/browser.sh
 
 test-usage:
     bash packaging/tests/usage.sh

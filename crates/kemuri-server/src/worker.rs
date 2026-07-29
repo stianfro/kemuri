@@ -137,19 +137,37 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
         settings: job.check.probe_params.clone().into(),
     };
 
+    let execution_failure_class = format!("execution:{}", job.check_id);
+    let timeout_failure_class = format!("timeout:{}", job.check_id);
     let round_result = match tokio::time::timeout(
         job.check.timeout,
         probe.execute_round(context, resolved_check),
     )
     .await
     {
-        Ok(Ok(round)) => round,
+        Ok(Ok(round)) => {
+            for class in [&execution_failure_class, &timeout_failure_class] {
+                if let Some(suppressed) = crate::failure_log::recovery("probe_worker", class) {
+                    tracing::info!(
+                        check_id = %job.check_id,
+                        suppressed,
+                        "probe worker recovered after repeated failures"
+                    );
+                }
+            }
+            round
+        }
         Ok(Err(e)) => {
-            tracing::warn!(
-                check_id = %job.check_id,
-                error = %e,
-                "probe execution error"
-            );
+            if let Some(suppressed) =
+                crate::failure_log::failure("probe_worker", &execution_failure_class)
+            {
+                tracing::warn!(
+                    check_id = %job.check_id,
+                    error = %e,
+                    suppressed,
+                    "probe execution error"
+                );
+            }
             let finished_at = Utc::now();
             return RoundResult {
                 target_id: job.target_id.clone(),
@@ -169,10 +187,15 @@ async fn execute_round(registry: &ProbeRegistry, job: &RoundJob) -> RoundResult 
             };
         }
         Err(_) => {
-            tracing::warn!(
-                check_id = %job.check_id,
-                "probe execution timed out"
-            );
+            if let Some(suppressed) =
+                crate::failure_log::failure("probe_worker", &timeout_failure_class)
+            {
+                tracing::warn!(
+                    check_id = %job.check_id,
+                    suppressed,
+                    "probe execution timed out"
+                );
+            }
             let finished_at = Utc::now();
             return RoundResult {
                 target_id: job.target_id.clone(),

@@ -1,6 +1,7 @@
 mod alerts;
 mod api;
 mod events;
+mod failure_log;
 mod notification;
 mod notifiers;
 mod probe_registry;

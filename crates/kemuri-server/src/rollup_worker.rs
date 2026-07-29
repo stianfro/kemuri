@@ -38,13 +38,21 @@ impl RollupWorker {
 
             match self.run_cycle().await {
                 Ok(buckets_processed) => {
+                    if let Some(suppressed) = crate::failure_log::recovery("rollup", "database") {
+                        tracing::info!(
+                            suppressed,
+                            "rollup worker recovered after repeated failures"
+                        );
+                    }
                     metrics::counter!("kemuri_rollup_buckets_processed")
                         .increment(buckets_processed);
                     metrics::gauge!("kemuri_rollup_last_cycle_buckets")
                         .set(buckets_processed as f64);
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "rollup worker cycle failed");
+                    if let Some(suppressed) = crate::failure_log::failure("rollup", "database") {
+                        tracing::error!(error = %e, suppressed, "rollup worker cycle failed");
+                    }
                     metrics::counter!("kemuri_rollup_errors").increment(1);
                 }
             }

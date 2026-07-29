@@ -73,10 +73,18 @@ impl StorageWriter {
         while let Some(result) = rx.recv().await {
             let start = std::time::Instant::now();
             if let Err(e) = self.write_round(result).await {
-                tracing::error!(error = %e, "failed to write round result");
+                if let Some(suppressed) = crate::failure_log::failure("writer", "database") {
+                    tracing::error!(error = %e, suppressed, "failed to write round result");
+                }
                 metrics::counter!("kemuri_writer_errors").increment(1);
                 metrics::counter!("kemuri_storage_writes_total", "result" => "error").increment(1);
             } else {
+                if let Some(suppressed) = crate::failure_log::recovery("writer", "database") {
+                    tracing::info!(
+                        suppressed,
+                        "storage writer recovered after repeated failures"
+                    );
+                }
                 metrics::counter!("kemuri_storage_writes_total", "result" => "success")
                     .increment(1);
             }

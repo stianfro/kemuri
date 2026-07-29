@@ -58,13 +58,25 @@ impl AlertEvaluator {
     pub async fn run(&self, mut rx: mpsc::Receiver<AlertNotification>) {
         while let Some(notif) = rx.recv().await {
             if let Err(e) = self.evaluate_round(&notif).await {
-                tracing::error!(
-                    target_id = %notif.target_id,
-                    check_id = %notif.check_id,
-                    error = %e,
-                    "alert evaluation failed"
-                );
+                if let Some(suppressed) =
+                    crate::failure_log::failure("alert_evaluator", "round_database")
+                {
+                    tracing::error!(
+                        target_id = %notif.target_id,
+                        check_id = %notif.check_id,
+                        error = %e,
+                        suppressed,
+                        "alert evaluation failed"
+                    );
+                }
                 metrics::counter!("kemuri_alert_eval_errors").increment(1);
+            } else if let Some(suppressed) =
+                crate::failure_log::recovery("alert_evaluator", "round_database")
+            {
+                tracing::info!(
+                    suppressed,
+                    "alert evaluator recovered after repeated round failures"
+                );
             }
         }
         tracing::info!("alert evaluator shutting down");
@@ -72,7 +84,22 @@ impl AlertEvaluator {
 
     pub async fn run_no_data_check(&self) {
         if let Err(e) = self.evaluate_no_data().await {
-            tracing::error!(error = %e, "no-data alert evaluation failed");
+            if let Some(suppressed) =
+                crate::failure_log::failure("alert_evaluator", "no_data_database")
+            {
+                tracing::error!(
+                    error = %e,
+                    suppressed,
+                    "no-data alert evaluation failed"
+                );
+            }
+        } else if let Some(suppressed) =
+            crate::failure_log::recovery("alert_evaluator", "no_data_database")
+        {
+            tracing::info!(
+                suppressed,
+                "alert evaluator recovered after repeated no-data failures"
+            );
         }
     }
 

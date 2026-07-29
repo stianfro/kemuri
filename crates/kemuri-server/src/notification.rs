@@ -48,9 +48,29 @@ impl NotificationWorker {
                 }
             }
 
-            if let Err(e) = self.run_cycle().await {
-                tracing::error!(error = %e, "notification worker cycle failed");
-                metrics::counter!("kemuri_notification_worker_errors").increment(1);
+            match self.run_cycle().await {
+                Ok(()) => {
+                    if let Some(suppressed) =
+                        crate::failure_log::recovery("notification", "database")
+                    {
+                        tracing::info!(
+                            suppressed,
+                            "notification worker recovered after repeated failures"
+                        );
+                    }
+                }
+                Err(e) => {
+                    if let Some(suppressed) =
+                        crate::failure_log::failure("notification", "database")
+                    {
+                        tracing::error!(
+                            error = %e,
+                            suppressed,
+                            "notification worker cycle failed"
+                        );
+                    }
+                    metrics::counter!("kemuri_notification_worker_errors").increment(1);
+                }
             }
         }
     }

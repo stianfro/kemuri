@@ -290,6 +290,13 @@ export interface components {
             alerts: components["schemas"]["AlertStateResponse"][];
             next_cursor?: string | null;
         };
+        ApiBuildInfo: {
+            /** Format: int64 */
+            build_timestamp_ms: number;
+            git_hash: string;
+            target: string;
+            version: string;
+        };
         ApiError: {
             code: string;
             message: string;
@@ -330,6 +337,13 @@ export interface components {
         GroupsResponse: {
             groups: components["schemas"]["GroupResponse"][];
             next_cursor?: string | null;
+        };
+        ReloadStatus: {
+            error?: string | null;
+            generation: string;
+            result: string;
+            /** Format: int64 */
+            timestamp_ms: number;
         };
         RoundSummary: {
             /** Format: int32 */
@@ -417,6 +431,28 @@ export interface components {
             revision_id: string;
             /** Format: int64 */
             timestamp_ms: number;
+        };
+        SystemStatus: {
+            /** Format: int64 */
+            active_alerts: number;
+            config_generation?: string | null;
+            database_path: string;
+            /** Format: int64 */
+            database_size_bytes: number;
+            /** Format: int64 */
+            disk_free_bytes?: number | null;
+            disk_ready: boolean;
+            /** Format: int64 */
+            disk_total_bytes?: number | null;
+            last_config_reload?: null | components["schemas"]["ReloadStatus"];
+            /** Format: int64 */
+            notification_outbox_pending: number;
+            probe_ready: boolean;
+            runtime_ready: boolean;
+            schema_version: string;
+            status: string;
+            /** Format: int64 */
+            uptime_seconds: number;
         };
         TargetDetail: {
             checks: components["schemas"]["CheckSummary"][];
@@ -704,7 +740,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ApiBuildInfo"];
+                };
             };
         };
     };
@@ -722,7 +760,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["SystemStatus"];
+                };
             };
         };
     };

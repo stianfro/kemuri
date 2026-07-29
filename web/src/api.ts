@@ -1,97 +1,26 @@
-export interface BuildInfo {
-  version: string;
-  git_hash: string;
-  build_timestamp_ms: number;
-  target: string;
-}
+import type { components } from './generated/api';
 
-export interface TargetSummary {
-  target_id: string;
-  name: string;
-  group_path: string;
-  state: string;
-  checks_count: number;
-}
+export type BuildInfo = components['schemas']['ApiBuildInfo'];
 
-export interface GroupResponse {
-  group_path: string;
-  targets: TargetSummary[];
-}
-
-export interface TargetsResponse {
-  targets: TargetSummary[];
-  groups: GroupResponse[];
-  next_cursor: string | null;
-}
-
-export interface CheckSummary {
-  check_id: string;
-  probe_type: string;
-  state: string;
+export type TargetSummary = components['schemas']['TargetSummary'];
+export type GroupResponse = components['schemas']['GroupResponse'];
+export type TargetsResponse = components['schemas']['TargetsResponse'];
+export type CheckSummary = Omit<components['schemas']['CheckSummary'], 'last_latency_us' | 'measurement_loss_ratio'> & {
   last_latency_us: number | null;
   measurement_loss_ratio: number | null;
-}
-
-export interface TargetDetail {
-  target_id: string;
-  name: string;
-  group_path: string;
+};
+export type TargetDetail = Omit<components['schemas']['TargetDetail'], 'labels' | 'checks'> & {
   labels: Record<string, string>;
-  state: string;
   checks: CheckSummary[];
-}
-
-export interface CheckDetail {
-  check_id: string;
-  target_id: string;
-  probe_type: string;
-  state: string;
+};
+export type CheckDetail = Omit<components['schemas']['CheckDetail'], 'last_latency_us' | 'measurement_loss_ratio' | 'health_failure_ratio' | 'last_round_timestamp_ms'> & {
   last_latency_us: number | null;
   measurement_loss_ratio: number | null;
   health_failure_ratio: number | null;
   last_round_timestamp_ms: number | null;
-  observer_id: string;
-}
-
-export interface SeriesPoint {
-  timestamp_ms: number;
-  bucket_status: 'observed' | 'skipped' | 'missing';
-  rounds_count: number;
-  attempted: number;
-  latency_bearing: number;
-  healthy: number;
-  unhealthy: number;
-  measurement_lost: number;
-  min_latency_us: number | null;
-  p50_latency_us: number | null;
-  p95_latency_us: number | null;
-  max_latency_us: number | null;
-  measurement_loss_ratio: number;
-  health_failure_ratio: number;
-  histogram_bins: number[];
-}
-
-export interface SeriesResponse {
-  target_id: string;
-  check_id: string;
-  observer_id: string;
-  from_ms: number;
-  to_ms: number;
-  resolution_ms: number;
-  source: string;
-  quantiles: string;
-  histogram_bin_representatives_us: number[];
-  points: SeriesPoint[];
-  alert_events: Array<{
-    timestamp_ms: number;
-    event_type: string;
-    rule_id: string;
-  }>;
-  revision_markers: Array<{
-    timestamp_ms: number;
-    revision_id: string;
-  }>;
-}
+};
+export type SeriesPoint = components['schemas']['SeriesPoint'];
+export type SeriesResponse = components['schemas']['SeriesResponse'];
 
 export interface SampleDetail {
   outcome: string;
@@ -118,68 +47,23 @@ export interface RoundsResponse {
   next_cursor: string | null;
 }
 
-export interface AlertState {
-  internal_id: number;
-  rule_id: string;
-  target_id: string;
-  check_id: string;
-  state: string;
-  state_entered_ms: number;
+export type AlertState = Omit<components['schemas']['AlertStateResponse'], 'first_condition_true_ms' | 'last_evaluated_ms' | 'last_notification_ms' | 'last_metric_value'> & {
   first_condition_true_ms: number | null;
   last_evaluated_ms: number | null;
   last_notification_ms: number | null;
   last_metric_value: number | null;
-}
-
-export interface AlertsListResponse {
-  alerts: AlertState[];
-  next_cursor: string | null;
-}
-
-export interface AlertEvent {
-  internal_id: number;
-  rule_id: string;
-  target_id: string;
-  check_id: string;
-  event_type: string;
-  from_state: string;
-  to_state: string;
+};
+export type AlertsListResponse = Omit<components['schemas']['AlertsListResponse'], 'alerts'> & { alerts: AlertState[] };
+export type AlertEvent = Omit<components['schemas']['AlertEventResponse'], 'metric_value' | 'threshold_value'> & {
   metric_value: number | null;
   threshold_value: number | null;
-  timestamp_ms: number;
-}
+};
+export type AlertEventsResponse = Omit<components['schemas']['AlertEventsResponse'], 'events'> & { events: AlertEvent[] };
 
-export interface AlertEventsResponse {
-  events: AlertEvent[];
-  next_cursor: string | null;
-}
+export type ChecksResponse = Omit<components['schemas']['ChecksResponse'], 'checks'> & { checks: CheckSummary[] };
+export type GroupsResponse = components['schemas']['GroupsResponse'];
 
-export interface ChecksResponse {
-  checks: CheckSummary[];
-  next_cursor: string | null;
-}
-
-export interface GroupsResponse {
-  groups: GroupResponse[];
-  next_cursor: string | null;
-}
-
-export interface SystemStatus {
-  status: string;
-  uptime_seconds: number;
-  database_path: string;
-  database_size_bytes: number;
-  schema_version: string;
-  config_generation: string | null;
-  notification_outbox_pending: number;
-  active_alerts: number;
-  last_config_reload: {
-    generation: string;
-    result: string;
-    error: string | null;
-    timestamp_ms: number;
-  } | null;
-}
+export type SystemStatus = components['schemas']['SystemStatus'];
 
 const BASE = '/api/v1';
 

@@ -402,7 +402,14 @@
         "operationId": "info",
         "responses": {
           "200": {
-            "description": "Build information"
+            "description": "Build information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiBuildInfo"
+                }
+              }
+            }
           }
         }
       }
@@ -413,7 +420,14 @@
         "operationId": "system_status",
         "responses": {
           "200": {
-            "description": "Runtime and dependency status"
+            "description": "Runtime and dependency status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatus"
+                }
+              }
+            }
           }
         }
       }
@@ -1010,6 +1024,30 @@
           }
         }
       },
+      "ApiBuildInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "git_hash",
+          "build_timestamp_ms",
+          "target"
+        ],
+        "properties": {
+          "build_timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "git_hash": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "required": [
@@ -1172,6 +1210,32 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ReloadStatus": {
+        "type": "object",
+        "required": [
+          "generation",
+          "result",
+          "timestamp_ms"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "generation": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -1480,6 +1544,90 @@
           "timestamp_ms": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "SystemStatus": {
+        "type": "object",
+        "required": [
+          "status",
+          "uptime_seconds",
+          "database_path",
+          "database_size_bytes",
+          "disk_ready",
+          "runtime_ready",
+          "probe_ready",
+          "schema_version",
+          "notification_outbox_pending",
+          "active_alerts"
+        ],
+        "properties": {
+          "active_alerts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "config_generation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "database_path": {
+            "type": "string"
+          },
+          "database_size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "disk_free_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "disk_ready": {
+            "type": "boolean"
+          },
+          "disk_total_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_config_reload": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReloadStatus"
+              }
+            ]
+          },
+          "notification_outbox_pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "probe_ready": {
+            "type": "boolean"
+          },
+          "runtime_ready": {
+            "type": "boolean"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "uptime_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

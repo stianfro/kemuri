@@ -72,12 +72,49 @@ pub struct AppState {
     pub probe_ready: Arc<AtomicBool>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct ReloadStatus {
     pub generation: String,
     pub result: String,
     pub error: Option<String>,
     pub timestamp_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ApiBuildInfo {
+    pub version: String,
+    pub git_hash: String,
+    pub build_timestamp_ms: i64,
+    pub target: String,
+}
+
+impl From<&BuildInfo> for ApiBuildInfo {
+    fn from(value: &BuildInfo) -> Self {
+        Self {
+            version: value.version.clone(),
+            git_hash: value.git_hash.clone(),
+            build_timestamp_ms: value.build_timestamp_ms,
+            target: value.target.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct SystemStatus {
+    pub status: String,
+    pub uptime_seconds: u64,
+    pub database_path: String,
+    pub database_size_bytes: i64,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub disk_ready: bool,
+    pub runtime_ready: bool,
+    pub probe_ready: bool,
+    pub schema_version: String,
+    pub config_generation: Option<String>,
+    pub notification_outbox_pending: i64,
+    pub active_alerts: i64,
+    pub last_config_reload: Option<ReloadStatus>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -738,18 +775,18 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
 #[utoipa::path(
     get,
     path = "/api/v1/info",
-    responses((status = 200, description = "Build information"))
+    responses((status = 200, description = "Build information", body = ApiBuildInfo))
 )]
-async fn info(State(state): State<AppState>) -> Json<BuildInfo> {
-    Json(state.build_info.as_ref().clone())
+async fn info(State(state): State<AppState>) -> Json<ApiBuildInfo> {
+    Json(ApiBuildInfo::from(state.build_info.as_ref()))
 }
 
 #[utoipa::path(
     get,
     path = "/api/v1/system/status",
-    responses((status = 200, description = "Runtime and dependency status"))
+    responses((status = 200, description = "Runtime and dependency status", body = SystemStatus))
 )]
-async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn system_status(State(state): State<AppState>) -> Json<SystemStatus> {
     let uptime = state.started_at.elapsed().as_secs();
     let config = state.config.read().unwrap().clone();
     let db_size: i64 = match std::fs::metadata(&config.storage.path) {
@@ -789,22 +826,22 @@ async fn system_status(State(state): State<AppState>) -> Json<serde_json::Value>
     .await
     .unwrap_or((None,));
 
-    Json(serde_json::json!({
-        "status": "running",
-        "uptime_seconds": uptime,
-        "database_path": config.storage.path,
-        "database_size_bytes": db_size,
-        "disk_free_bytes": disk_free_bytes,
-        "disk_total_bytes": disk_total_bytes,
-        "disk_ready": state.disk_ready.load(Ordering::Acquire),
-        "runtime_ready": state.runtime_ready.load(Ordering::Acquire),
-        "probe_ready": state.probe_ready.load(Ordering::Acquire),
-        "schema_version": schema_version.0,
-        "config_generation": config_generation.0,
-        "notification_outbox_pending": pending_outbox.0,
-        "active_alerts": active_alerts.0,
-        "last_config_reload": last_reload,
-    }))
+    Json(SystemStatus {
+        status: "running".to_owned(),
+        uptime_seconds: uptime,
+        database_path: config.storage.path.clone(),
+        database_size_bytes: db_size,
+        disk_free_bytes,
+        disk_total_bytes,
+        disk_ready: state.disk_ready.load(Ordering::Acquire),
+        runtime_ready: state.runtime_ready.load(Ordering::Acquire),
+        probe_ready: state.probe_ready.load(Ordering::Acquire),
+        schema_version: schema_version.0,
+        config_generation: config_generation.0,
+        notification_outbox_pending: pending_outbox.0,
+        active_alerts: active_alerts.0,
+        last_config_reload: last_reload,
+    })
 }
 
 #[utoipa::path(

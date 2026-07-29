@@ -217,7 +217,11 @@ pub async fn serve(
     let registry = Arc::new(registry);
 
     let (job_tx, job_rx) = mpsc::channel::<worker::RoundJob>(256);
-    let (result_tx, result_rx) = mpsc::channel::<writer::RoundResult>(256);
+    // One aligned slot can make every active check produce a result at once.
+    // Keep enough bounded capacity to record that complete slot without
+    // blocking scheduler dispatch behind SQLite writes.
+    let result_queue_capacity = resolved.checks.len().max(256);
+    let (result_tx, result_rx) = mpsc::channel::<writer::RoundResult>(result_queue_capacity);
     let (alert_tx, alert_rx) = mpsc::channel::<alerts::AlertNotification>(256);
     let (event_tx, _) = tokio::sync::broadcast::channel::<SystemEvent>(256);
     let (fatal_tx, mut fatal_rx) = mpsc::channel::<&'static str>(16);

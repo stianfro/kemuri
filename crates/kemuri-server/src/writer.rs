@@ -71,6 +71,7 @@ impl StorageWriter {
 
     pub async fn run(&self, mut rx: tokio::sync::mpsc::Receiver<RoundResult>) {
         while let Some(result) = rx.recv().await {
+            metrics::gauge!("kemuri_writer_queue_depth").set(rx.len() as f64);
             let start = std::time::Instant::now();
             if let Err(e) = self.write_round(result).await {
                 if let Some(suppressed) = crate::failure_log::failure("writer", "database") {

@@ -66,3 +66,49 @@ async fn five_hundred_checks_dispatch_once_without_starvation() {
     assert_eq!(jobs.len(), 500);
     assert_eq!(unique.len(), 500);
 }
+
+#[tokio::test]
+async fn skipped_rounds_survive_result_queue_backpressure() {
+    let config = SchedulerConfig {
+        max_concurrent: 1,
+        tick_interval: "1ms".to_owned(),
+        default_jitter: "0%".to_owned(),
+        ..SchedulerConfig::default()
+    };
+    let checks: Vec<_> = (0..100).map(check).collect();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::channel(100);
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(1);
+    let mut scheduler = Scheduler::new(config, checks, job_tx, result_tx, Arc::new(RealClock));
+    scheduler.start();
+
+    tokio::time::timeout(Duration::from_secs(5), job_rx.recv())
+        .await
+        .expect("first job was not dispatched")
+        .expect("scheduler queue closed");
+
+    let skipped = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut results = Vec::with_capacity(99);
+        while results.len() < 99 {
+            results.push(
+                result_rx
+                    .recv()
+                    .await
+                    .expect("scheduler result queue closed"),
+            );
+        }
+        results
+    })
+    .await
+    .expect("skipped rounds were lost under result queue backpressure");
+    scheduler.stop().await;
+
+    let unique: HashSet<_> = skipped
+        .iter()
+        .map(|result| (result.target_id.clone(), result.check_id.clone()))
+        .collect();
+    assert_eq!(skipped.len(), 99);
+    assert_eq!(unique.len(), 99);
+    assert!(skipped.iter().all(|result| {
+        result.execution_status == kemuri_core::RoundExecutionStatus::SkippedBackpressure
+    }));
+}

@@ -71,10 +71,12 @@ impl WorkerPool {
                     let key = (job.target_id.clone(), job.check_id.clone());
                     let result = execute_round(&registry, &job).await;
 
-                    {
+                    let in_flight = {
                         let mut running = running_rounds.lock().await;
                         running.remove(&key);
-                    }
+                        running.len()
+                    };
+                    metrics::gauge!("kemuri_scheduler_in_flight").set(in_flight as f64);
 
                     if result_tx.send(result).await.is_err() {
                         tracing::debug!(worker_id, "worker shutting down: result channel closed");

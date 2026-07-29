@@ -90,6 +90,8 @@ impl Scheduler {
             let mut startup_rounds = HashSet::new();
             let mut active_checks = checks;
             let mut paused = false;
+            metrics::gauge!("kemuri_scheduler_active_checks").set(active_checks.len() as f64);
+            metrics::gauge!("kemuri_scheduler_in_flight").set(0.0);
 
             let now: DateTime<Utc> = clock.system_time().into();
             for check in &active_checks {
@@ -192,8 +194,7 @@ impl Scheduler {
                             "skipping round due to overlap"
                         );
                         metrics::counter!("kemuri_scheduler_rounds_skipped_overlap",
-                            "target_id" => check.target_id.to_string(),
-                            "check_id" => check.check_id.to_string())
+                            "probe_kind" => check.probe_kind.to_string())
                         .increment(1);
                         record_skipped_round(
                             &result_queue,
@@ -201,7 +202,8 @@ impl Scheduler {
                             due,
                             kemuri_core::RoundExecutionStatus::SkippedOverlap,
                             "overlap",
-                        );
+                        )
+                        .await;
                         let next = advance_due(due, check.interval);
                         next_due.insert(key, next);
                         continue;
@@ -222,7 +224,8 @@ impl Scheduler {
                             due,
                             kemuri_core::RoundExecutionStatus::SkippedBackpressure,
                             "global_concurrency",
-                        );
+                        )
+                        .await;
                         next_due.insert(key, advance_due(due, check.interval));
                         continue;
                     }
@@ -256,13 +259,19 @@ impl Scheduler {
                                 due,
                                 kemuri_core::RoundExecutionStatus::SkippedBackpressure,
                                 "probe_concurrency",
-                            );
+                            )
+                            .await;
                             next_due.insert(key, advance_due(due, check.interval));
                             continue;
                         }
                     }
 
-                    running_rounds.lock().await.insert(key.clone());
+                    let in_flight = {
+                        let mut running = running_rounds.lock().await;
+                        running.insert(key.clone());
+                        running.len()
+                    };
+                    metrics::gauge!("kemuri_scheduler_in_flight").set(in_flight as f64);
 
                     let job = RoundJob {
                         target_id: check.target_id.clone(),
@@ -273,6 +282,15 @@ impl Scheduler {
 
                     match queue.try_send(job) {
                         Ok(()) => {
+                            let schedule_delay = now.signed_duration_since(due);
+                            metrics::histogram!(
+                                "kemuri_scheduler_dispatch_delay_seconds",
+                                "probe_kind" => check.probe_kind.to_string()
+                            )
+                            .record(
+                                schedule_delay.num_microseconds().unwrap_or_default().max(0) as f64
+                                    / 1_000_000.0,
+                            );
                             metrics::counter!("kemuri_scheduler_rounds_total", "result" => "dispatched")
                                 .increment(1);
                             let next = if startup_rounds.remove(&key) {
@@ -289,7 +307,12 @@ impl Scheduler {
                             next_due.insert(key, next);
                         }
                         Err(mpsc::error::TrySendError::Full(_)) => {
-                            running_rounds.lock().await.remove(&key);
+                            let in_flight = {
+                                let mut running = running_rounds.lock().await;
+                                running.remove(&key);
+                                running.len()
+                            };
+                            metrics::gauge!("kemuri_scheduler_in_flight").set(in_flight as f64);
                             tracing::warn!(
                                 target_id = %check.target_id,
                                 check_id = %check.check_id,
@@ -304,11 +327,17 @@ impl Scheduler {
                                 due,
                                 kemuri_core::RoundExecutionStatus::SkippedBackpressure,
                                 "queue_full",
-                            );
+                            )
+                            .await;
                             next_due.insert(key, advance_due(due, check.interval));
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
-                            running_rounds.lock().await.remove(&key);
+                            let in_flight = {
+                                let mut running = running_rounds.lock().await;
+                                running.remove(&key);
+                                running.len()
+                            };
+                            metrics::gauge!("kemuri_scheduler_in_flight").set(in_flight as f64);
                             tracing::error!("scheduler queue closed, stopping");
                             break 'scheduler;
                         }
@@ -359,7 +388,7 @@ impl Scheduler {
     }
 }
 
-fn record_skipped_round(
+async fn record_skipped_round(
     result_queue: &mpsc::Sender<RoundResult>,
     check: &ResolvedCheckDef,
     scheduled_at: DateTime<Utc>,
@@ -367,20 +396,26 @@ fn record_skipped_round(
     reason: &str,
 ) {
     let now = Utc::now();
-    let _ = result_queue.try_send(RoundResult {
-        target_id: check.target_id.clone(),
-        check_id: check.check_id.clone(),
-        scheduled_at,
-        started_at: now,
-        finished_at: now,
-        execution_status,
-        stop_reason: Some(reason.to_owned()),
-        sample_results: Vec::new(),
-        configured_samples: match &check.probe_params {
-            kemuri_config::ResolvedProbeParams::Icmp(params) => params.count,
-            _ => 1,
-        },
-    });
+    if result_queue
+        .send(RoundResult {
+            target_id: check.target_id.clone(),
+            check_id: check.check_id.clone(),
+            scheduled_at,
+            started_at: now,
+            finished_at: now,
+            execution_status,
+            stop_reason: Some(reason.to_owned()),
+            sample_results: Vec::new(),
+            configured_samples: match &check.probe_params {
+                kemuri_config::ResolvedProbeParams::Icmp(params) => params.count,
+                _ => 1,
+            },
+        })
+        .await
+        .is_err()
+    {
+        tracing::error!("result queue closed while recording a skipped round");
+    }
 }
 
 fn deterministic_offset(

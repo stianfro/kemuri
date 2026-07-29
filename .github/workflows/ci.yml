@@ -104,7 +104,15 @@ jobs:
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68
         with:
-          tool: just@1.55.1,yq@4.47.2
+          tool: just@1.55.1
+      - name: Install yq
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 \
+            -o /tmp/yq
+          echo "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0  /tmp/yq" \
+            | sha256sum --check
+          sudo install -m 0755 /tmp/yq /usr/local/bin/yq
       - run: sudo apt-get update && sudo apt-get install -y jq lsof sqlite3
       - run: just yaml test-load test-usage
 

@@ -91,7 +91,7 @@ export function System() {
         <Row label="Version" value={info.version} />
         <Row label="Git Hash" value={info.git_hash} />
         <Row label="Build Target" value={info.target} />
-        <Row label="Built At" value={info.build_timestamp} />
+        <Row label="Built At" value={formatTime(info.build_timestamp_ms)} />
       </Card>
 
       <Card title="Runtime">
@@ -116,7 +116,7 @@ export function System() {
           label="Last Reload"
           value={
             status.last_config_reload
-              ? formatTime(status.last_config_reload.timestamp)
+              ? formatTime(status.last_config_reload.timestamp_ms)
               : 'Never'
           }
         />

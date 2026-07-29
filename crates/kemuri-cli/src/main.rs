@@ -79,9 +79,10 @@ async fn main() -> Result<()> {
             let build_info = kemuri_core::BuildInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 git_hash: option_env!("GIT_HASH").unwrap_or("unknown").to_owned(),
-                build_timestamp: option_env!("BUILD_TIMESTAMP")
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                build_timestamp_ms: option_env!("BUILD_TIMESTAMP")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or_default()
+                    * 1_000,
                 target: option_env!("BUILD_TARGET").unwrap_or("unknown").to_owned(),
             };
             init_tracing(&config);

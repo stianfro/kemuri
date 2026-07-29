@@ -89,10 +89,10 @@ pub struct AlertStateResponse {
     pub target_id: String,
     pub check_id: String,
     pub state: String,
-    pub state_entered_at: String,
-    pub first_condition_true_at: Option<String>,
-    pub last_evaluated_at: Option<String>,
-    pub last_notification_at: Option<String>,
+    pub state_entered_ms: i64,
+    pub first_condition_true_ms: Option<i64>,
+    pub last_evaluated_ms: Option<i64>,
+    pub last_notification_ms: Option<i64>,
     pub last_metric_value: Option<f64>,
 }
 
@@ -172,10 +172,13 @@ pub async fn list_alerts(
             target_id,
             check_id,
             state: alert.state.clone(),
-            state_entered_at: alert.state_entered_at.clone(),
-            first_condition_true_at: alert.first_condition_true_at.clone(),
-            last_evaluated_at: alert.last_evaluated_at.clone(),
-            last_notification_at: alert.last_notification_at.clone(),
+            state_entered_ms: timestamp_millis(&alert.state_entered_at),
+            first_condition_true_ms: alert
+                .first_condition_true_at
+                .as_deref()
+                .map(timestamp_millis),
+            last_evaluated_ms: alert.last_evaluated_at.as_deref().map(timestamp_millis),
+            last_notification_ms: alert.last_notification_at.as_deref().map(timestamp_millis),
             last_metric_value: alert.last_metric_value,
         });
     }
@@ -242,10 +245,13 @@ pub async fn get_alert(
         target_id,
         check_id,
         state: alert.state.clone(),
-        state_entered_at: alert.state_entered_at.clone(),
-        first_condition_true_at: alert.first_condition_true_at.clone(),
-        last_evaluated_at: alert.last_evaluated_at.clone(),
-        last_notification_at: alert.last_notification_at.clone(),
+        state_entered_ms: timestamp_millis(&alert.state_entered_at),
+        first_condition_true_ms: alert
+            .first_condition_true_at
+            .as_deref()
+            .map(timestamp_millis),
+        last_evaluated_ms: alert.last_evaluated_at.as_deref().map(timestamp_millis),
+        last_notification_ms: alert.last_notification_at.as_deref().map(timestamp_millis),
         last_metric_value: alert.last_metric_value,
     }))
 }
@@ -256,8 +262,8 @@ pub struct AlertEventsQuery {
     pub rule_id: Option<String>,
     pub target_id: Option<String>,
     pub check_id: Option<String>,
-    pub from: Option<String>,
-    pub to: Option<String>,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
@@ -273,7 +279,6 @@ pub struct AlertEventResponse {
     pub to_state: String,
     pub metric_value: Option<f64>,
     pub threshold_value: Option<f64>,
-    pub occurred_at: String,
     pub timestamp_ms: i64,
 }
 
@@ -305,8 +310,10 @@ pub async fn list_alert_events(
         kemuri_storage::AlertEventRepo::list_by_rule(&pool, rule_id, limit)
             .await
             .map_err(internal_error)?
-    } else if let Some(ref from) = query.from {
-        let to = query.to.as_deref().unwrap_or("2099-01-01T00:00:00Z");
+    } else if let Some(from_ms) = query.from_ms {
+        let from = parse_range_time(Some(from_ms), "from_ms")?.to_rfc3339();
+        let to =
+            parse_range_time(Some(query.to_ms.unwrap_or(4_102_444_800_000)), "to_ms")?.to_rfc3339();
         let check_internal_id: i64 = if let Some(ref target_id) = query.target_id {
             let target = kemuri_storage::TargetRepo::get_by_target_id(&pool, target_id)
                 .await
@@ -331,8 +338,8 @@ pub async fn list_alert_events(
         kemuri_storage::AlertEventRepo::list_by_check_range(
             &pool,
             check_internal_id,
-            from,
-            to,
+            &from,
+            &to,
             limit,
         )
         .await
@@ -373,7 +380,6 @@ pub async fn list_alert_events(
             to_state: event.to_state.clone(),
             metric_value: event.metric_value,
             threshold_value: event.threshold_value,
-            occurred_at: event.occurred_at.clone(),
             timestamp_ms: timestamp_millis(&event.occurred_at),
         });
     }
@@ -536,7 +542,6 @@ pub struct CheckSummary {
     pub check_id: String,
     pub probe_type: String,
     pub state: String,
-    pub last_latency_ms: Option<f64>,
     pub last_latency_us: Option<i64>,
     pub measurement_loss_ratio: Option<f64>,
 }
@@ -583,7 +588,6 @@ pub async fn get_target(
             check_id: c.check_id.clone(),
             probe_type: c.probe_type.clone(),
             state: c.state.as_deref().unwrap_or("no_data").to_owned(),
-            last_latency_ms: c.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
             last_latency_us: c.last_latency_ns.map(|ns| ns / 1_000),
             measurement_loss_ratio: c.last_measurement_loss_ratio,
         })
@@ -619,11 +623,9 @@ pub struct CheckDetail {
     pub target_id: String,
     pub probe_type: String,
     pub state: String,
-    pub last_latency_ms: Option<f64>,
     pub last_latency_us: Option<i64>,
     pub measurement_loss_ratio: Option<f64>,
     pub health_failure_ratio: Option<f64>,
-    pub last_round_at: Option<String>,
     pub last_round_timestamp_ms: Option<i64>,
     pub observer_id: String,
 }
@@ -667,7 +669,6 @@ pub async fn list_checks(
             check_id: c.check_id.clone(),
             probe_type: c.probe_type.clone(),
             state: c.state.as_deref().unwrap_or("no_data").to_owned(),
-            last_latency_ms: c.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
             last_latency_us: c.last_latency_ns.map(|ns| ns / 1_000),
             measurement_loss_ratio: c.last_measurement_loss_ratio,
         })
@@ -740,12 +741,10 @@ pub async fn get_check(
         target_id,
         probe_type: check.probe_type,
         state: check.state.as_deref().unwrap_or("no_data").to_owned(),
-        last_latency_ms: check.last_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
         last_latency_us: check.last_latency_ns.map(|ns| ns / 1_000),
         measurement_loss_ratio: check.last_measurement_loss_ratio,
         health_failure_ratio: check.last_health_failure_ratio,
         last_round_timestamp_ms: check.last_round_at.as_deref().map(timestamp_millis),
-        last_round_at: check.last_round_at,
         observer_id: "local".to_owned(),
     }))
 }
@@ -755,14 +754,11 @@ pub async fn get_check(
 pub struct SeriesQuery {
     pub from_ms: Option<i64>,
     pub to_ms: Option<i64>,
-    pub from: Option<String>,
-    pub to: Option<String>,
     pub max_points: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SeriesPoint {
-    pub timestamp: String,
     pub timestamp_ms: i64,
     pub bucket_status: String,
     pub rounds_count: usize,
@@ -771,10 +767,6 @@ pub struct SeriesPoint {
     pub healthy: i64,
     pub unhealthy: i64,
     pub measurement_lost: i64,
-    pub min_latency_ms: Option<f64>,
-    pub p50_latency_ms: Option<f64>,
-    pub p95_latency_ms: Option<f64>,
-    pub max_latency_ms: Option<f64>,
     pub min_latency_us: Option<i64>,
     pub p50_latency_us: Option<i64>,
     pub p95_latency_us: Option<i64>,
@@ -789,14 +781,12 @@ pub struct SeriesResponse {
     pub target_id: String,
     pub check_id: String,
     pub observer_id: String,
-    pub from: String,
-    pub to: String,
     pub from_ms: i64,
     pub to_ms: i64,
     pub resolution_ms: i64,
     pub source: String,
     pub quantiles: String,
-    pub histogram_bin_representatives_ms: Vec<f64>,
+    pub histogram_bin_representatives_us: Vec<i64>,
     pub points: Vec<SeriesPoint>,
     pub alert_events: Vec<SeriesAlertEvent>,
     pub revision_markers: Vec<SeriesRevisionMarker>,
@@ -843,8 +833,8 @@ pub async fn get_series(
         return Err(bad_request("max_points must be between 1 and 5000"));
     }
 
-    let from_time = parse_range_time(query.from_ms, query.from.as_deref(), "from_ms")?;
-    let to_time = parse_range_time(query.to_ms, query.to.as_deref(), "to_ms")?;
+    let from_time = parse_range_time(query.from_ms, "from_ms")?;
+    let to_time = parse_range_time(query.to_ms, "to_ms")?;
     if from_time >= to_time {
         return Err(bad_request("from_ms must be less than to_ms"));
     }
@@ -912,10 +902,7 @@ pub async fn get_series(
     };
 
     let bin_reps_ns = kemuri_core::Histogram::bin_representatives();
-    let bin_reps_ms: Vec<f64> = bin_reps_ns
-        .iter()
-        .map(|&ns| ns as f64 / 1_000_000.0)
-        .collect();
+    let bin_reps_us: Vec<i64> = bin_reps_ns.iter().map(|&ns| (ns / 1_000) as i64).collect();
     let alert_rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT occurred_at, event_type, rule_id FROM alert_events
          WHERE check_internal_id = ? AND occurred_at >= ? AND occurred_at < ?
@@ -943,14 +930,12 @@ pub async fn get_series(
         target_id,
         check_id,
         observer_id: "local".to_owned(),
-        from: from_string,
-        to: to_string,
         from_ms: from_time.timestamp_millis(),
         to_ms: to_time.timestamp_millis(),
         resolution_ms: resolution_secs * 1000,
         source: source.to_owned(),
         quantiles: quantiles.to_owned(),
-        histogram_bin_representatives_ms: bin_reps_ms,
+        histogram_bin_representatives_us: bin_reps_us,
         points,
         alert_events: alert_rows
             .into_iter()
@@ -972,20 +957,13 @@ pub async fn get_series(
 
 fn parse_range_time(
     milliseconds: Option<i64>,
-    legacy: Option<&str>,
     name: &str,
 ) -> Result<chrono::DateTime<chrono::FixedOffset>, ApiError> {
-    if let Some(milliseconds) = milliseconds {
-        return chrono::DateTime::from_timestamp_millis(milliseconds)
-            .map(|value| value.fixed_offset())
-            .ok_or_else(|| bad_request(&format!("invalid '{name}' parameter")));
-    }
-    legacy
-        .ok_or_else(|| bad_request(&format!("missing '{name}' parameter")))
-        .and_then(|value| {
-            chrono::DateTime::parse_from_rfc3339(value)
-                .map_err(|_| bad_request(&format!("invalid '{name}' parameter")))
-        })
+    chrono::DateTime::from_timestamp_millis(
+        milliseconds.ok_or_else(|| bad_request(&format!("missing '{name}' parameter")))?,
+    )
+    .map(|value| value.fixed_offset())
+    .ok_or_else(|| bad_request(&format!("invalid '{name}' parameter")))
 }
 
 async fn build_series_from_raw(
@@ -1027,10 +1005,6 @@ async fn build_series_from_raw(
         .iter()
         .map(|(idx, bucket_rounds)| {
             let timestamp_secs = from_time.timestamp() + idx * bucket_secs as i64;
-            let timestamp = chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                .unwrap_or_default()
-                .to_rfc3339();
-
             let attempted: i64 = bucket_rounds
                 .iter()
                 .map(|r| r.attempted_samples as i64)
@@ -1053,13 +1027,13 @@ async fn build_series_from_raw(
                 .iter()
                 .filter_map(|r| r.min_latency_ns)
                 .min()
-                .map(|ns| ns as f64 / 1_000_000.0);
+                .map(|ns| ns / 1_000);
 
             let max_lat = bucket_rounds
                 .iter()
                 .filter_map(|r| r.max_latency_ns)
                 .max()
-                .map(|ns| ns as f64 / 1_000_000.0);
+                .map(|ns| ns / 1_000);
 
             let mut histogram = kemuri_core::Histogram::new();
             let mut all_lats: Vec<i64> = Vec::new();
@@ -1078,8 +1052,8 @@ async fn build_series_from_raw(
             }
 
             all_lats.sort();
-            let p50 = percentile(&all_lats, 50).map(|ns| ns as f64 / 1_000_000.0);
-            let p95 = percentile(&all_lats, 95).map(|ns| ns as f64 / 1_000_000.0);
+            let p50 = percentile(&all_lats, 50).map(|ns| ns / 1_000);
+            let p95 = percentile(&all_lats, 95).map(|ns| ns / 1_000);
 
             let total = (healthy + unhealthy + measurement_lost) as f64;
             let ml_ratio = if total > 0.0 {
@@ -1094,10 +1068,7 @@ async fn build_series_from_raw(
             };
 
             SeriesPoint {
-                timestamp_ms: chrono::DateTime::parse_from_rfc3339(&timestamp)
-                    .map(|value| value.timestamp_millis())
-                    .unwrap_or_default(),
-                timestamp,
+                timestamp_ms: timestamp_secs * 1_000,
                 bucket_status: if bucket_rounds.iter().all(|round| {
                     round.execution_status.starts_with("skipped")
                         || round.execution_status == "cancelled"
@@ -1112,14 +1083,10 @@ async fn build_series_from_raw(
                 healthy,
                 unhealthy,
                 measurement_lost,
-                min_latency_ms: min_lat,
-                p50_latency_ms: p50,
-                p95_latency_ms: p95,
-                max_latency_ms: max_lat,
-                min_latency_us: min_lat.map(|value| (value * 1000.0) as i64),
-                p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
-                p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
-                max_latency_us: max_lat.map(|value| (value * 1000.0) as i64),
+                min_latency_us: min_lat,
+                p50_latency_us: p50,
+                p95_latency_us: p95,
+                max_latency_us: max_lat,
                 measurement_loss_ratio: ml_ratio,
                 health_failure_ratio: hf_ratio,
                 histogram_bins: histogram.bins().to_vec(),
@@ -1146,9 +1113,6 @@ async fn build_series_from_raw(
 
 fn empty_series_point(timestamp_ms: i64) -> SeriesPoint {
     SeriesPoint {
-        timestamp: chrono::DateTime::from_timestamp_millis(timestamp_ms)
-            .unwrap_or_default()
-            .to_rfc3339(),
         timestamp_ms,
         bucket_status: "missing".to_owned(),
         rounds_count: 0,
@@ -1157,10 +1121,6 @@ fn empty_series_point(timestamp_ms: i64) -> SeriesPoint {
         healthy: 0,
         unhealthy: 0,
         measurement_lost: 0,
-        min_latency_ms: None,
-        p50_latency_ms: None,
-        p95_latency_ms: None,
-        max_latency_ms: None,
         min_latency_us: None,
         p50_latency_us: None,
         p95_latency_us: None,
@@ -1219,8 +1179,8 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
         .and_then(|blob| kemuri_core::Histogram::decode(blob))
         .unwrap_or_default();
 
-    let p50 = histogram.quantile(0.5).map(|ns| ns as f64 / 1_000_000.0);
-    let p95 = histogram.quantile(0.95).map(|ns| ns as f64 / 1_000_000.0);
+    let p50 = histogram.quantile(0.5).map(|ns| (ns / 1_000) as i64);
+    let p95 = histogram.quantile(0.95).map(|ns| (ns / 1_000) as i64);
 
     let total = (r.healthy_samples + r.unhealthy_samples + r.measurement_loss_samples) as f64;
     let ml_ratio = if total > 0.0 {
@@ -1238,7 +1198,6 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
         timestamp_ms: chrono::DateTime::parse_from_rfc3339(&r.bucket_start)
             .map(|value| value.timestamp_millis())
             .unwrap_or_default(),
-        timestamp: r.bucket_start.clone(),
         bucket_status: if r.completed_rounds + r.partial_rounds == 0 {
             "skipped".to_owned()
         } else {
@@ -1250,13 +1209,9 @@ fn rollup_to_series_point(r: &kemuri_storage::RollupRow) -> SeriesPoint {
         healthy: r.healthy_samples,
         unhealthy: r.unhealthy_samples,
         measurement_lost: r.measurement_loss_samples,
-        min_latency_ms: r.min_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
-        p50_latency_ms: p50,
-        p95_latency_ms: p95,
-        max_latency_ms: r.max_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
         min_latency_us: r.min_latency_ns.map(|ns| ns / 1_000),
-        p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
-        p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
+        p50_latency_us: p50,
+        p95_latency_us: p95,
         max_latency_us: r.max_latency_ns.map(|ns| ns / 1_000),
         measurement_loss_ratio: ml_ratio,
         health_failure_ratio: hf_ratio,
@@ -1302,8 +1257,8 @@ fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
         }
     }
 
-    let p50 = histogram.quantile(0.5).map(|ns| ns as f64 / 1_000_000.0);
-    let p95 = histogram.quantile(0.95).map(|ns| ns as f64 / 1_000_000.0);
+    let p50 = histogram.quantile(0.5).map(|ns| (ns / 1_000) as i64);
+    let p95 = histogram.quantile(0.95).map(|ns| (ns / 1_000) as i64);
 
     let total = (total_healthy + total_unhealthy + total_measurement_lost) as f64;
     let ml_ratio = if total > 0.0 {
@@ -1321,7 +1276,6 @@ fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
         timestamp_ms: chrono::DateTime::parse_from_rfc3339(&first.bucket_start)
             .map(|value| value.timestamp_millis())
             .unwrap_or_default(),
-        timestamp: first.bucket_start.clone(),
         bucket_status: if total_attempted == 0 {
             "skipped".to_owned()
         } else {
@@ -1333,13 +1287,9 @@ fn merge_rollups(chunk: &[kemuri_storage::RollupRow]) -> SeriesPoint {
         healthy: total_healthy,
         unhealthy: total_unhealthy,
         measurement_lost: total_measurement_lost,
-        min_latency_ms: min_lat.map(|ns| ns as f64 / 1_000_000.0),
-        p50_latency_ms: p50,
-        p95_latency_ms: p95,
-        max_latency_ms: max_lat.map(|ns| ns as f64 / 1_000_000.0),
         min_latency_us: min_lat.map(|ns| ns / 1_000),
-        p50_latency_us: p50.map(|value| (value * 1000.0) as i64),
-        p95_latency_us: p95.map(|value| (value * 1000.0) as i64),
+        p50_latency_us: p50,
+        p95_latency_us: p95,
         max_latency_us: max_lat.map(|ns| ns / 1_000),
         measurement_loss_ratio: ml_ratio,
         health_failure_ratio: hf_ratio,
@@ -1365,14 +1315,12 @@ pub struct RoundsQuery {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SampleDetail {
     pub outcome: String,
-    pub latency_ms: Option<f64>,
     pub latency_us: Option<i64>,
     pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RoundSummary {
-    pub scheduled_at: String,
     pub timestamp_ms: i64,
     pub execution_status: String,
     pub stop_reason: Option<String>,
@@ -1380,8 +1328,6 @@ pub struct RoundSummary {
     pub healthy_samples: i32,
     pub unhealthy_samples: i32,
     pub measurement_loss_samples: i32,
-    pub min_latency_ms: Option<f64>,
-    pub max_latency_ms: Option<f64>,
     pub min_latency_us: Option<i64>,
     pub max_latency_us: Option<i64>,
     pub outcome_summary: Option<String>,
@@ -1456,7 +1402,6 @@ pub async fn get_rounds(
         .map(|r| {
             let samples = decode_sample_details(r.sample_blob.as_deref());
             RoundSummary {
-                scheduled_at: r.scheduled_at.clone(),
                 timestamp_ms: timestamp_millis(&r.scheduled_at),
                 execution_status: r.execution_status.clone(),
                 stop_reason: r.stop_reason.clone(),
@@ -1464,8 +1409,6 @@ pub async fn get_rounds(
                 healthy_samples: r.healthy_samples,
                 unhealthy_samples: r.unhealthy_samples,
                 measurement_loss_samples: r.measurement_loss_samples,
-                min_latency_ms: r.min_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
-                max_latency_ms: r.max_latency_ns.map(|ns| ns as f64 / 1_000_000.0),
                 min_latency_us: r.min_latency_ns.map(|ns| ns / 1_000),
                 max_latency_us: r.max_latency_ns.map(|ns| ns / 1_000),
                 outcome_summary: r.outcome_summary.clone(),
@@ -1565,7 +1508,6 @@ fn decode_sample_details(sample_blob: Option<&[u8]>) -> Vec<SampleDetail> {
 
             SampleDetail {
                 outcome: format!("{:?}", rec.outcome),
-                latency_ms: rec.latency_ns.map(|ns| ns as f64 / 1_000_000.0),
                 latency_us: rec.latency_ns.map(|ns| (ns / 1_000) as i64),
                 metadata,
             }
@@ -1759,19 +1701,16 @@ mod tests {
         assert_eq!(merged.healthy, 22);
         assert_eq!(merged.unhealthy, 2);
         assert_eq!(merged.measurement_lost, 6);
-        assert_eq!(merged.min_latency_ms, Some(1.0));
-        assert_eq!(merged.max_latency_ms, Some(20.0));
+        assert_eq!(merged.min_latency_us, Some(1_000));
+        assert_eq!(merged.max_latency_us, Some(20_000));
     }
 
     #[test]
     fn series_response_has_metadata() {
         let bin_reps_ns = kemuri_core::Histogram::bin_representatives();
-        let bin_reps_ms: Vec<f64> = bin_reps_ns
-            .iter()
-            .map(|&ns| ns as f64 / 1_000_000.0)
-            .collect();
-        assert_eq!(bin_reps_ms.len(), kemuri_core::Histogram::num_bins());
-        assert!(bin_reps_ms[0] > 0.0);
+        let bin_reps_us: Vec<u64> = bin_reps_ns.iter().map(|&ns| ns / 1_000).collect();
+        assert_eq!(bin_reps_us.len(), kemuri_core::Histogram::num_bins());
+        assert!(bin_reps_us.last().copied().unwrap_or_default() > 0);
     }
 
     #[test]

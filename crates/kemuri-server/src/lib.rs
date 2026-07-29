@@ -79,7 +79,7 @@ pub struct ReloadStatus {
     pub generation: String,
     pub result: String,
     pub error: Option<String>,
-    pub timestamp: String,
+    pub timestamp_ms: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -506,7 +506,7 @@ async fn perform_reload(
                 generation: String::new(),
                 result: "failure".to_owned(),
                 error: Some(e.to_string()),
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
             };
             *last_reload.write().unwrap() = Some(status);
             return;
@@ -522,7 +522,7 @@ async fn perform_reload(
                 generation: String::new(),
                 result: "failure".to_owned(),
                 error: Some(e.to_string()),
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
             };
             *last_reload.write().unwrap() = Some(status);
             return;
@@ -539,7 +539,7 @@ async fn perform_reload(
                 generation: new_generation,
                 result: "failure".to_owned(),
                 error: Some("notifier initialization failed".to_owned()),
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
             });
             return;
         }
@@ -552,7 +552,7 @@ async fn perform_reload(
             generation: new_generation,
             result: "failure".to_owned(),
             error: Some(e.to_string()),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         *last_reload.write().unwrap() = Some(status);
         return;
@@ -589,7 +589,7 @@ async fn perform_reload(
         generation: new_generation,
         result: "success".to_owned(),
         error: None,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
     };
     *last_reload.write().unwrap() = Some(status);
 

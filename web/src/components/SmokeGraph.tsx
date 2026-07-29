@@ -17,7 +17,13 @@ const TIME_RANGES = [
 interface SmokeGraphProps {
   targetId: string;
   checkId: string;
-  fetchSeries: (targetId: string, checkId: string, from: string, to: string, maxPoints?: number) => Promise<SeriesResponse>;
+  fetchSeries: (
+    targetId: string,
+    checkId: string,
+    fromMs: number,
+    toMs: number,
+    maxPoints?: number,
+  ) => Promise<SeriesResponse>;
 }
 
 interface TooltipData {
@@ -52,8 +58,8 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
       const result = await fetchSeries(
         targetId,
         checkId,
-        from.toISOString(),
-        to.toISOString(),
+        from.getTime(),
+        to.getTime(),
         maxPoints,
       );
       setData(result);
@@ -126,7 +132,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
       return;
     }
 
-    const binReps = data.histogram_bin_representatives_ms;
+    const binReps = data.histogram_bin_representatives_us.map((value) => value / 1000);
     const numBins = binReps.length;
 
     let minLatMs = Infinity;
@@ -254,7 +260,8 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     ctx.beginPath();
     for (let i = 0; i < points.length; i++) {
       const x = PADDING.left + i * cellW + cellW / 2;
-      const p50 = points[i]!.p50_latency_ms;
+      const p50 =
+        points[i]!.p50_latency_us == null ? null : points[i]!.p50_latency_us! / 1000;
       if (p50 != null) {
         const y = yToPixel(p50);
         if (i === 0) ctx.moveTo(x, y);
@@ -269,7 +276,8 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     ctx.beginPath();
     for (let i = 0; i < points.length; i++) {
       const x = PADDING.left + i * cellW + cellW / 2;
-      const p95 = points[i]!.p95_latency_ms;
+      const p95 =
+        points[i]!.p95_latency_us == null ? null : points[i]!.p95_latency_us! / 1000;
       if (p95 != null) {
         const y = yToPixel(p95);
         if (i === 0) ctx.moveTo(x, y);
@@ -365,7 +373,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
     for (let i = 0; i < points.length; i += xStep) {
       const x = PADDING.left + i * cellW + cellW / 2;
       const pt = points[i];
-      const label = pt ? formatAxisTime(pt.timestamp) : '';
+      const label = pt ? formatAxisTime(pt.timestamp_ms) : '';
       ctx.fillText(label, x, canvasSize.height - PADDING.bottom + 20);
     }
   }, [data, canvasSize, logScale]);
@@ -520,7 +528,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
             }}
           >
             <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              {formatTime(tooltip.point.timestamp)}
+              {formatTime(tooltip.point.timestamp_ms)}
             </div>
             <div>Rounds: {tooltip.point.rounds_count}</div>
             <div>
@@ -537,19 +545,19 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
               Health failure:{' '}
               {(tooltip.point.health_failure_ratio * 100).toFixed(1)}%
             </div>
-            {tooltip.point.min_latency_ms != null && (
+            {tooltip.point.min_latency_us != null && (
               <div>
-                Min: {formatLatency(tooltip.point.min_latency_ms)} | Median:{' '}
-                {tooltip.point.p50_latency_ms != null
-                  ? formatLatency(tooltip.point.p50_latency_ms)
+                Min: {formatLatency(tooltip.point.min_latency_us / 1000)} | Median:{' '}
+                {tooltip.point.p50_latency_us != null
+                  ? formatLatency(tooltip.point.p50_latency_us / 1000)
                   : '-'}
               </div>
             )}
-            {tooltip.point.p95_latency_ms != null && (
+            {tooltip.point.p95_latency_us != null && (
               <div>
-                P95: {formatLatency(tooltip.point.p95_latency_ms)} | Max:{' '}
-                {tooltip.point.max_latency_ms != null
-                  ? formatLatency(tooltip.point.max_latency_ms)
+                P95: {formatLatency(tooltip.point.p95_latency_us / 1000)} | Max:{' '}
+                {tooltip.point.max_latency_us != null
+                  ? formatLatency(tooltip.point.max_latency_us / 1000)
                   : '-'}
               </div>
             )}

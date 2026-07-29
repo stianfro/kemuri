@@ -129,7 +129,7 @@ export function Target() {
                   <td style={{ padding: 8 }}>{c.probe_type}</td>
                   <td style={{ padding: 8 }}>{stateBadge(c.state)}</td>
                   <td style={{ padding: 8 }}>
-                    {formatLatency(c.last_latency_ms)}
+                    {formatLatency(c.last_latency_us == null ? null : c.last_latency_us / 1000)}
                   </td>
                   <td style={{ padding: 8 }}>
                     {c.measurement_loss_ratio !== null

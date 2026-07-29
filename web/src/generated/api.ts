@@ -256,7 +256,6 @@ export interface components {
             internal_id: number;
             /** Format: double */
             metric_value?: number | null;
-            occurred_at: string;
             rule_id: string;
             target_id: string;
             /** Format: double */
@@ -271,16 +270,20 @@ export interface components {
         };
         AlertStateResponse: {
             check_id: string;
-            first_condition_true_at?: string | null;
+            /** Format: int64 */
+            first_condition_true_ms?: number | null;
             /** Format: int64 */
             internal_id: number;
-            last_evaluated_at?: string | null;
+            /** Format: int64 */
+            last_evaluated_ms?: number | null;
             /** Format: double */
             last_metric_value?: number | null;
-            last_notification_at?: string | null;
+            /** Format: int64 */
+            last_notification_ms?: number | null;
             rule_id: string;
             state: string;
-            state_entered_at: string;
+            /** Format: int64 */
+            state_entered_ms: number;
             target_id: string;
         };
         AlertsListResponse: {
@@ -296,11 +299,8 @@ export interface components {
             check_id: string;
             /** Format: double */
             health_failure_ratio?: number | null;
-            /** Format: double */
-            last_latency_ms?: number | null;
             /** Format: int64 */
             last_latency_us?: number | null;
-            last_round_at?: string | null;
             /** Format: int64 */
             last_round_timestamp_ms?: number | null;
             /** Format: double */
@@ -312,8 +312,6 @@ export interface components {
         };
         CheckSummary: {
             check_id: string;
-            /** Format: double */
-            last_latency_ms?: number | null;
             /** Format: int64 */
             last_latency_us?: number | null;
             /** Format: double */
@@ -339,19 +337,14 @@ export interface components {
             execution_status: string;
             /** Format: int32 */
             healthy_samples: number;
-            /** Format: double */
-            max_latency_ms?: number | null;
             /** Format: int64 */
             max_latency_us?: number | null;
             /** Format: int32 */
             measurement_loss_samples: number;
-            /** Format: double */
-            min_latency_ms?: number | null;
             /** Format: int64 */
             min_latency_us?: number | null;
             outcome_summary?: string | null;
             samples: components["schemas"]["SampleDetail"][];
-            scheduled_at: string;
             stop_reason?: string | null;
             /** Format: int64 */
             timestamp_ms: number;
@@ -363,8 +356,6 @@ export interface components {
             rounds: components["schemas"]["RoundSummary"][];
         };
         SampleDetail: {
-            /** Format: double */
-            latency_ms?: number | null;
             /** Format: int64 */
             latency_us?: number | null;
             metadata?: unknown;
@@ -387,28 +378,19 @@ export interface components {
             histogram_bins: number[];
             /** Format: int64 */
             latency_bearing: number;
-            /** Format: double */
-            max_latency_ms?: number | null;
             /** Format: int64 */
             max_latency_us?: number | null;
             /** Format: double */
             measurement_loss_ratio: number;
             /** Format: int64 */
             measurement_lost: number;
-            /** Format: double */
-            min_latency_ms?: number | null;
             /** Format: int64 */
             min_latency_us?: number | null;
-            /** Format: double */
-            p50_latency_ms?: number | null;
             /** Format: int64 */
             p50_latency_us?: number | null;
-            /** Format: double */
-            p95_latency_ms?: number | null;
             /** Format: int64 */
             p95_latency_us?: number | null;
             rounds_count: number;
-            timestamp: string;
             /** Format: int64 */
             timestamp_ms: number;
             /** Format: int64 */
@@ -417,10 +399,9 @@ export interface components {
         SeriesResponse: {
             alert_events: components["schemas"]["SeriesAlertEvent"][];
             check_id: string;
-            from: string;
             /** Format: int64 */
             from_ms: number;
-            histogram_bin_representatives_ms: number[];
+            histogram_bin_representatives_us: number[];
             observer_id: string;
             points: components["schemas"]["SeriesPoint"][];
             quantiles: string;
@@ -429,7 +410,6 @@ export interface components {
             revision_markers: components["schemas"]["SeriesRevisionMarker"][];
             source: string;
             target_id: string;
-            to: string;
             /** Format: int64 */
             to_ms: number;
         };
@@ -473,8 +453,8 @@ export interface operations {
                 rule_id?: string;
                 target_id?: string;
                 check_id?: string;
-                from?: string;
-                to?: string;
+                from_ms?: number;
+                to_ms?: number;
                 limit?: number;
                 cursor?: string;
             };
@@ -967,8 +947,6 @@ export interface operations {
             query?: {
                 from_ms?: number;
                 to_ms?: number;
-                from?: string;
-                to?: string;
                 max_points?: number;
             };
             header?: never;

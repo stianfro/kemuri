@@ -114,7 +114,9 @@ export function Check() {
 
       <div style={{ fontSize: 14, color: 'var(--text-muted)', marginBottom: 16 }}>
         Probe: <strong>{check.probe_type}</strong>
-        {check.last_round_at && <> | Last round: {formatTime(check.last_round_at)}</>}
+        {check.last_round_timestamp_ms && (
+          <> | Last round: {formatTime(check.last_round_timestamp_ms)}</>
+        )}
       </div>
 
       {activeAlerts.length > 0 && (
@@ -149,7 +151,12 @@ export function Check() {
           margin: '16px 0',
         }}
       >
-        <MetricCard label="Latency" value={formatLatency(check.last_latency_ms)} />
+        <MetricCard
+          label="Latency"
+          value={formatLatency(
+            check.last_latency_us == null ? null : check.last_latency_us / 1000,
+          )}
+        />
         <MetricCard
           label="Measurement Loss"
           value={
@@ -206,16 +213,16 @@ export function Check() {
                   key={i}
                   style={{ borderBottom: '1px solid var(--border)' }}
                 >
-                  <td style={{ padding: 6 }}>{formatTime(r.scheduled_at)}</td>
+                  <td style={{ padding: 6 }}>{formatTime(r.timestamp_ms)}</td>
                   <td style={{ padding: 6 }}>{r.execution_status}</td>
                   <td style={{ padding: 6 }}>{r.healthy_samples}</td>
                   <td style={{ padding: 6 }}>{r.unhealthy_samples}</td>
                   <td style={{ padding: 6 }}>{r.measurement_loss_samples}</td>
                   <td style={{ padding: 6 }}>
-                    {formatLatency(r.min_latency_ms)}
+                    {formatLatency(r.min_latency_us == null ? null : r.min_latency_us / 1000)}
                   </td>
                   <td style={{ padding: 6 }}>
-                    {formatLatency(r.max_latency_ms)}
+                    {formatLatency(r.max_latency_us == null ? null : r.max_latency_us / 1000)}
                   </td>
                 </tr>
               ))}

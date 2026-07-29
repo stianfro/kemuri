@@ -42,19 +42,21 @@
             }
           },
           {
-            "name": "from",
+            "name": "from_ms",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int64"
             }
           },
           {
-            "name": "to",
+            "name": "to_ms",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer",
+              "format": "int64"
             }
           },
           {
@@ -795,22 +797,6 @@
             }
           },
           {
-            "name": "from",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "max_points",
             "in": "query",
             "required": false,
@@ -878,7 +864,6 @@
           "event_type",
           "from_state",
           "to_state",
-          "occurred_at",
           "timestamp_ms"
         ],
         "properties": {
@@ -901,9 +886,6 @@
               "null"
             ],
             "format": "double"
-          },
-          "occurred_at": {
-            "type": "string"
           },
           "rule_id": {
             "type": "string"
@@ -955,27 +937,29 @@
           "target_id",
           "check_id",
           "state",
-          "state_entered_at"
+          "state_entered_ms"
         ],
         "properties": {
           "check_id": {
             "type": "string"
           },
-          "first_condition_true_at": {
+          "first_condition_true_ms": {
             "type": [
-              "string",
+              "integer",
               "null"
-            ]
+            ],
+            "format": "int64"
           },
           "internal_id": {
             "type": "integer",
             "format": "int64"
           },
-          "last_evaluated_at": {
+          "last_evaluated_ms": {
             "type": [
-              "string",
+              "integer",
               "null"
-            ]
+            ],
+            "format": "int64"
           },
           "last_metric_value": {
             "type": [
@@ -984,11 +968,12 @@
             ],
             "format": "double"
           },
-          "last_notification_at": {
+          "last_notification_ms": {
             "type": [
-              "string",
+              "integer",
               "null"
-            ]
+            ],
+            "format": "int64"
           },
           "rule_id": {
             "type": "string"
@@ -996,8 +981,9 @@
           "state": {
             "type": "string"
           },
-          "state_entered_at": {
-            "type": "string"
+          "state_entered_ms": {
+            "type": "integer",
+            "format": "int64"
           },
           "target_id": {
             "type": "string"
@@ -1063,25 +1049,12 @@
             ],
             "format": "double"
           },
-          "last_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "last_latency_us": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64"
-          },
-          "last_round_at": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "last_round_timestamp_ms": {
             "type": [
@@ -1121,13 +1094,6 @@
         "properties": {
           "check_id": {
             "type": "string"
-          },
-          "last_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
           },
           "last_latency_us": {
             "type": [
@@ -1212,7 +1178,6 @@
       "RoundSummary": {
         "type": "object",
         "required": [
-          "scheduled_at",
           "timestamp_ms",
           "execution_status",
           "attempted_samples",
@@ -1233,13 +1198,6 @@
             "type": "integer",
             "format": "int32"
           },
-          "max_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "max_latency_us": {
             "type": [
               "integer",
@@ -1250,13 +1208,6 @@
           "measurement_loss_samples": {
             "type": "integer",
             "format": "int32"
-          },
-          "min_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
           },
           "min_latency_us": {
             "type": [
@@ -1276,9 +1227,6 @@
             "items": {
               "$ref": "#/components/schemas/SampleDetail"
             }
-          },
-          "scheduled_at": {
-            "type": "string"
           },
           "stop_reason": {
             "type": [
@@ -1322,13 +1270,6 @@
           "outcome"
         ],
         "properties": {
-          "latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "latency_us": {
             "type": [
               "integer",
@@ -1365,7 +1306,6 @@
       "SeriesPoint": {
         "type": "object",
         "required": [
-          "timestamp",
           "timestamp_ms",
           "bucket_status",
           "rounds_count",
@@ -1406,13 +1346,6 @@
             "type": "integer",
             "format": "int64"
           },
-          "max_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "max_latency_us": {
             "type": [
               "integer",
@@ -1428,13 +1361,6 @@
             "type": "integer",
             "format": "int64"
           },
-          "min_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "min_latency_us": {
             "type": [
               "integer",
@@ -1442,26 +1368,12 @@
             ],
             "format": "int64"
           },
-          "p50_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
           "p50_latency_us": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64"
-          },
-          "p95_latency_ms": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
           },
           "p95_latency_us": {
             "type": [
@@ -1473,9 +1385,6 @@
           "rounds_count": {
             "type": "integer",
             "minimum": 0
-          },
-          "timestamp": {
-            "type": "string"
           },
           "timestamp_ms": {
             "type": "integer",
@@ -1493,14 +1402,12 @@
           "target_id",
           "check_id",
           "observer_id",
-          "from",
-          "to",
           "from_ms",
           "to_ms",
           "resolution_ms",
           "source",
           "quantiles",
-          "histogram_bin_representatives_ms",
+          "histogram_bin_representatives_us",
           "points",
           "alert_events",
           "revision_markers"
@@ -1515,18 +1422,15 @@
           "check_id": {
             "type": "string"
           },
-          "from": {
-            "type": "string"
-          },
           "from_ms": {
             "type": "integer",
             "format": "int64"
           },
-          "histogram_bin_representatives_ms": {
+          "histogram_bin_representatives_us": {
             "type": "array",
             "items": {
-              "type": "number",
-              "format": "double"
+              "type": "integer",
+              "format": "int64"
             }
           },
           "observer_id": {
@@ -1555,9 +1459,6 @@
             "type": "string"
           },
           "target_id": {
-            "type": "string"
-          },
-          "to": {
             "type": "string"
           },
           "to_ms": {

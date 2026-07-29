@@ -1,7 +1,7 @@
 export interface BuildInfo {
   version: string;
   git_hash: string;
-  build_timestamp: string;
+  build_timestamp_ms: number;
   target: string;
 }
 
@@ -28,7 +28,7 @@ export interface CheckSummary {
   check_id: string;
   probe_type: string;
   state: string;
-  last_latency_ms: number | null;
+  last_latency_us: number | null;
   measurement_loss_ratio: number | null;
 }
 
@@ -46,15 +46,14 @@ export interface CheckDetail {
   target_id: string;
   probe_type: string;
   state: string;
-  last_latency_ms: number | null;
+  last_latency_us: number | null;
   measurement_loss_ratio: number | null;
   health_failure_ratio: number | null;
-  last_round_at: string | null;
+  last_round_timestamp_ms: number | null;
   observer_id: string;
 }
 
 export interface SeriesPoint {
-  timestamp: string;
   timestamp_ms: number;
   bucket_status: 'observed' | 'skipped' | 'missing';
   rounds_count: number;
@@ -63,10 +62,6 @@ export interface SeriesPoint {
   healthy: number;
   unhealthy: number;
   measurement_lost: number;
-  min_latency_ms: number | null;
-  p50_latency_ms: number | null;
-  p95_latency_ms: number | null;
-  max_latency_ms: number | null;
   min_latency_us: number | null;
   p50_latency_us: number | null;
   p95_latency_us: number | null;
@@ -80,14 +75,12 @@ export interface SeriesResponse {
   target_id: string;
   check_id: string;
   observer_id: string;
-  from: string;
-  to: string;
   from_ms: number;
   to_ms: number;
   resolution_ms: number;
   source: string;
   quantiles: string;
-  histogram_bin_representatives_ms: number[];
+  histogram_bin_representatives_us: number[];
   points: SeriesPoint[];
   alert_events: Array<{
     timestamp_ms: number;
@@ -102,20 +95,20 @@ export interface SeriesResponse {
 
 export interface SampleDetail {
   outcome: string;
-  latency_ms: number | null;
+  latency_us: number | null;
   metadata: Record<string, string> | null;
 }
 
 export interface RoundSummary {
-  scheduled_at: string;
+  timestamp_ms: number;
   execution_status: string;
   stop_reason: string | null;
   attempted_samples: number;
   healthy_samples: number;
   unhealthy_samples: number;
   measurement_loss_samples: number;
-  min_latency_ms: number | null;
-  max_latency_ms: number | null;
+  min_latency_us: number | null;
+  max_latency_us: number | null;
   outcome_summary: string | null;
   samples: SampleDetail[];
 }
@@ -131,10 +124,10 @@ export interface AlertState {
   target_id: string;
   check_id: string;
   state: string;
-  state_entered_at: string;
-  first_condition_true_at: string | null;
-  last_evaluated_at: string | null;
-  last_notification_at: string | null;
+  state_entered_ms: number;
+  first_condition_true_ms: number | null;
+  last_evaluated_ms: number | null;
+  last_notification_ms: number | null;
   last_metric_value: number | null;
 }
 
@@ -153,7 +146,7 @@ export interface AlertEvent {
   to_state: string;
   metric_value: number | null;
   threshold_value: number | null;
-  occurred_at: string;
+  timestamp_ms: number;
 }
 
 export interface AlertEventsResponse {
@@ -184,7 +177,7 @@ export interface SystemStatus {
     generation: string;
     result: string;
     error: string | null;
-    timestamp: string;
+    timestamp_ms: number;
   } | null;
 }
 
@@ -218,11 +211,11 @@ export async function fetchCheck(targetId: string, checkId: string): Promise<Che
 export async function fetchSeries(
   targetId: string,
   checkId: string,
-  from: string,
-  to: string,
+  fromMs: number,
+  toMs: number,
   maxPoints?: number,
 ): Promise<SeriesResponse> {
-  const params = new URLSearchParams({ from, to });
+  const params = new URLSearchParams({ from_ms: String(fromMs), to_ms: String(toMs) });
   if (maxPoints) params.set('max_points', String(maxPoints));
   return fetchJson<SeriesResponse>(
     `${BASE}/targets/${targetId}/checks/${checkId}/series?${params}`,
@@ -278,8 +271,8 @@ export async function fetchAlertEvents(params?: {
   rule_id?: string;
   target_id?: string;
   check_id?: string;
-  from?: string;
-  to?: string;
+  from_ms?: number;
+  to_ms?: number;
   limit?: number;
 }): Promise<AlertEventsResponse> {
   const qs = params

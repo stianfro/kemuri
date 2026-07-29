@@ -37,10 +37,10 @@ function stateBadge(state: string) {
   );
 }
 
-function formatDuration(iso: string | null): string {
-  if (!iso) return '-';
+function formatDuration(timestampMs: number | null): string {
+  if (!timestampMs) return '-';
   try {
-    const start = new Date(iso).getTime();
+    const start = timestampMs;
     const now = Date.now();
     const diffMs = now - start;
     const diffMins = Math.floor(diffMs / 60000);
@@ -157,7 +157,7 @@ export function Alerts() {
                         : '-'}
                     </td>
                     <td style={{ padding: 8 }}>
-                      {formatDuration(a.state_entered_at)}
+                      {formatDuration(a.state_entered_ms)}
                     </td>
                   </tr>
                 ))}
@@ -196,7 +196,7 @@ export function Alerts() {
                   key={e.internal_id}
                   style={{ borderBottom: '1px solid var(--border)' }}
                 >
-                  <td style={{ padding: 6 }}>{formatTime(e.occurred_at)}</td>
+                  <td style={{ padding: 6 }}>{formatTime(e.timestamp_ms)}</td>
                   <td style={{ padding: 6 }}>
                     {e.event_type === 'firing' ? (
                       <span style={{ color: 'var(--danger)', fontWeight: 600 }}>Firing</span>

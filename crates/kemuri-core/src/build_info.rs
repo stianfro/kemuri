@@ -4,6 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct BuildInfo {
     pub version: String,
     pub git_hash: String,
-    pub build_timestamp: String,
+    pub build_timestamp_ms: i64,
     pub target: String,
 }

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,12 +58,16 @@ impl Default for HttpProbeConfig {
 
 pub struct HttpProbe {
     config: HttpProbeConfig,
+    pooled_clients: std::sync::Mutex<HashMap<String, reqwest::Client>>,
 }
 
 impl HttpProbe {
     pub fn new(config: HttpProbeConfig) -> Result<Self, ProbeExecutionError> {
         Self::build_client(&config)?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            pooled_clients: std::sync::Mutex::new(HashMap::new()),
+        })
     }
 
     fn build_client(config: &HttpProbeConfig) -> Result<reqwest::Client, ProbeExecutionError> {
@@ -76,6 +79,10 @@ impl HttpProbe {
             })
             .danger_accept_invalid_certs(!config.tls_validate)
             .tcp_nodelay(true);
+
+        if config.connection_mode == HttpConnectionMode::Fresh {
+            builder = builder.pool_max_idle_per_host(0);
+        }
 
         if let Some(ref ua) = config.user_agent {
             builder = builder.user_agent(ua);
@@ -134,11 +141,11 @@ impl HttpProbe {
         Ok(config)
     }
 
-    fn is_expected_status(&self, status: u16) -> bool {
-        if let Some((lo, hi)) = self.config.expected_status_range {
+    fn is_expected_status(config: &HttpProbeConfig, status: u16) -> bool {
+        if let Some((lo, hi)) = config.expected_status_range {
             return (lo..=hi).contains(&status);
         }
-        if let Some(expected) = self.config.expected_status {
+        if let Some(expected) = config.expected_status {
             return status == expected;
         }
         (200..400).contains(&status)
@@ -185,8 +192,12 @@ impl HttpProbe {
         SampleOutcome::InternalError
     }
 
-    async fn execute_single(&self, client: &reqwest::Client, timeout: Duration) -> SampleResult {
-        let method = match self.config.method.as_deref() {
+    async fn execute_single(
+        config: &HttpProbeConfig,
+        client: &reqwest::Client,
+        timeout: Duration,
+    ) -> SampleResult {
+        let method = match config.method.as_deref() {
             Some("HEAD") => reqwest::Method::HEAD,
             Some("POST") => reqwest::Method::POST,
             Some("PUT") => reqwest::Method::PUT,
@@ -194,12 +205,12 @@ impl HttpProbe {
             _ => reqwest::Method::GET,
         };
 
-        let mut request_builder = client.request(method, &self.config.url).timeout(timeout);
+        let mut request_builder = client.request(method, &config.url).timeout(timeout);
 
-        for (key, value) in &self.config.headers {
+        for (key, value) in &config.headers {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
-        if let Some(body) = self.config.body.as_ref() {
+        if let Some(body) = config.body.as_ref() {
             request_builder = request_builder.body(body.clone());
         }
 
@@ -207,7 +218,7 @@ impl HttpProbe {
         match request_builder.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
-                if self.config.measure_until == "body"
+                if config.measure_until == "body"
                     && let Err(error) = response.bytes().await
                 {
                     return SampleResult {
@@ -218,7 +229,7 @@ impl HttpProbe {
                     };
                 }
                 let elapsed = start.elapsed();
-                if self.is_expected_status(status) {
+                if Self::is_expected_status(config, status) {
                     SampleResult {
                         outcome: SampleOutcome::Success,
                         latency: Some(elapsed),
@@ -259,10 +270,26 @@ impl Probe for HttpProbe {
         check: ResolvedCheck,
     ) -> Result<ProbeRound, ProbeExecutionError> {
         let effective = self.config_for_check(&check)?;
-        let client = Arc::new(Self::build_client(&effective)?);
-
-        let probe = Self { config: effective };
-        let result = probe.execute_single(&client, check.timeout).await;
+        let client = match effective.connection_mode {
+            HttpConnectionMode::Pooled => {
+                let key = serde_json::to_string(&effective)
+                    .map_err(|error| ProbeExecutionError::Internal(error.to_string()))?;
+                if let Some(client) = self.pooled_clients.lock().unwrap().get(&key).cloned() {
+                    client
+                } else {
+                    let client = Self::build_client(&effective)?;
+                    self.pooled_clients
+                        .lock()
+                        .unwrap()
+                        .insert(key, client.clone());
+                    client
+                }
+            }
+            HttpConnectionMode::PerRound | HttpConnectionMode::Fresh => {
+                Self::build_client(&effective)?
+            }
+        };
+        let result = Self::execute_single(&effective, &client, check.timeout).await;
 
         Ok(ProbeRound {
             check_id: check.check_id,
@@ -290,8 +317,8 @@ mod tests {
             ..Default::default()
         };
         let probe = HttpProbe::new(config).unwrap();
-        assert!(probe.is_expected_status(200));
-        assert!(!probe.is_expected_status(404));
+        assert!(HttpProbe::is_expected_status(&probe.config, 200));
+        assert!(!HttpProbe::is_expected_status(&probe.config, 404));
     }
 
     #[test]
@@ -301,21 +328,21 @@ mod tests {
             ..Default::default()
         };
         let probe = HttpProbe::new(config).unwrap();
-        assert!(probe.is_expected_status(200));
-        assert!(probe.is_expected_status(301));
-        assert!(probe.is_expected_status(399));
-        assert!(!probe.is_expected_status(400));
-        assert!(!probe.is_expected_status(500));
+        assert!(HttpProbe::is_expected_status(&probe.config, 200));
+        assert!(HttpProbe::is_expected_status(&probe.config, 301));
+        assert!(HttpProbe::is_expected_status(&probe.config, 399));
+        assert!(!HttpProbe::is_expected_status(&probe.config, 400));
+        assert!(!HttpProbe::is_expected_status(&probe.config, 500));
     }
 
     #[test]
     fn expected_status_default_2xx_3xx() {
         let config = HttpProbeConfig::default();
         let probe = HttpProbe::new(config).unwrap();
-        assert!(probe.is_expected_status(200));
-        assert!(probe.is_expected_status(204));
-        assert!(probe.is_expected_status(301));
-        assert!(!probe.is_expected_status(400));
-        assert!(!probe.is_expected_status(500));
+        assert!(HttpProbe::is_expected_status(&probe.config, 200));
+        assert!(HttpProbe::is_expected_status(&probe.config, 204));
+        assert!(HttpProbe::is_expected_status(&probe.config, 301));
+        assert!(!HttpProbe::is_expected_status(&probe.config, 400));
+        assert!(!HttpProbe::is_expected_status(&probe.config, 500));
     }
 }

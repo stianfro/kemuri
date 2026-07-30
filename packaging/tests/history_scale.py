@@ -379,8 +379,10 @@ def verify_database(path: Path, *, retention_days: int = 7) -> dict[str, object]
                 WHERE ru.check_internal_id = rounds.check_internal_id
                   AND ru.observer_internal_id = rounds.observer_internal_id
                   AND ru.resolution_seconds = 300
-                  AND unixepoch(rounds.scheduled_at) >= unixepoch(ru.bucket_start)
-                  AND unixepoch(rounds.scheduled_at) < unixepoch(ru.bucket_start) + 300)""",
+                  AND CAST(strftime('%s', rounds.scheduled_at) AS INTEGER)
+                      >= CAST(strftime('%s', ru.bucket_start) AS INTEGER)
+                  AND CAST(strftime('%s', rounds.scheduled_at) AS INTEGER)
+                      < CAST(strftime('%s', ru.bucket_start) AS INTEGER) + 300)""",
                 (cutoff,),
             )
             retention.commit()

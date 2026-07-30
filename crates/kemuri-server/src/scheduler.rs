@@ -204,7 +204,14 @@ impl Scheduler {
                             "overlap",
                         )
                         .await;
-                        let next = advance_due(due, check.interval);
+                        let next = next_due_after_attempt(
+                            &mut startup_rounds,
+                            &key,
+                            now,
+                            due,
+                            check.interval,
+                            jitter_ratio,
+                        );
                         next_due.insert(key, next);
                         continue;
                     }
@@ -226,7 +233,15 @@ impl Scheduler {
                             "global_concurrency",
                         )
                         .await;
-                        next_due.insert(key, advance_due(due, check.interval));
+                        let next = next_due_after_attempt(
+                            &mut startup_rounds,
+                            &key,
+                            now,
+                            due,
+                            check.interval,
+                            jitter_ratio,
+                        );
+                        next_due.insert(key, next);
                         continue;
                     }
                     let probe_limit = match check.probe_kind {
@@ -261,7 +276,15 @@ impl Scheduler {
                                 "probe_concurrency",
                             )
                             .await;
-                            next_due.insert(key, advance_due(due, check.interval));
+                            let next = next_due_after_attempt(
+                                &mut startup_rounds,
+                                &key,
+                                now,
+                                due,
+                                check.interval,
+                                jitter_ratio,
+                            );
+                            next_due.insert(key, next);
                             continue;
                         }
                     }
@@ -293,17 +316,14 @@ impl Scheduler {
                             );
                             metrics::counter!("kemuri_scheduler_rounds_total", "result" => "dispatched")
                                 .increment(1);
-                            let next = if startup_rounds.remove(&key) {
-                                let offset = deterministic_offset(
-                                    &check.target_id,
-                                    &check.check_id,
-                                    check.interval,
-                                    jitter_ratio,
-                                );
-                                compute_next_due(now, check.interval, offset)
-                            } else {
-                                advance_due(due, check.interval)
-                            };
+                            let next = next_due_after_attempt(
+                                &mut startup_rounds,
+                                &key,
+                                now,
+                                due,
+                                check.interval,
+                                jitter_ratio,
+                            );
                             next_due.insert(key, next);
                         }
                         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -329,7 +349,15 @@ impl Scheduler {
                                 "queue_full",
                             )
                             .await;
-                            next_due.insert(key, advance_due(due, check.interval));
+                            let next = next_due_after_attempt(
+                                &mut startup_rounds,
+                                &key,
+                                now,
+                                due,
+                                check.interval,
+                                jitter_ratio,
+                            );
+                            next_due.insert(key, next);
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             let in_flight = {
@@ -438,6 +466,22 @@ fn advance_due(due: DateTime<Utc>, interval: Duration) -> DateTime<Utc> {
     due + chrono::Duration::from_std(interval).unwrap_or_default()
 }
 
+fn next_due_after_attempt(
+    startup_rounds: &mut HashSet<(TargetId, CheckId)>,
+    key: &(TargetId, CheckId),
+    now: DateTime<Utc>,
+    due: DateTime<Utc>,
+    interval: Duration,
+    jitter_ratio: f64,
+) -> DateTime<Utc> {
+    if startup_rounds.remove(key) {
+        let offset = deterministic_offset(&key.0, &key.1, interval, jitter_ratio);
+        compute_next_due(now, interval, offset)
+    } else {
+        advance_due(due, interval)
+    }
+}
+
 fn compute_next_due(after: DateTime<Utc>, interval: Duration, offset: Duration) -> DateTime<Utc> {
     let interval_secs = interval.as_secs();
     if interval_secs == 0 {
@@ -500,5 +544,31 @@ mod tests {
         let offset = deterministic_offset(&target, &check, interval, 0.1);
         let jitter_window = interval / 10;
         assert!(offset <= jitter_window);
+    }
+
+    #[test]
+    fn skipped_startup_round_moves_to_aligned_jittered_slot() {
+        let target = TargetId::new("t1").unwrap();
+        let check = CheckId::new("c1").unwrap();
+        let key = (target.clone(), check.clone());
+        let mut startup_rounds = HashSet::from([key.clone()]);
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:09Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let interval = Duration::from_secs(300);
+
+        let next = next_due_after_attempt(&mut startup_rounds, &key, now, now, interval, 0.1);
+
+        assert!(!startup_rounds.contains(&key));
+        assert!(next > now);
+        assert!(next < advance_due(now, interval));
+        assert_eq!(
+            next,
+            compute_next_due(
+                now,
+                interval,
+                deterministic_offset(&target, &check, interval, 0.1)
+            )
+        );
     }
 }

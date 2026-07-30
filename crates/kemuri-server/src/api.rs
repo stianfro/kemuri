@@ -452,46 +452,7 @@ pub async fn list_targets(
         .await
         .map_err(internal_error)?;
 
-    let mut target_map: std::collections::HashMap<String, Vec<TargetSummary>> =
-        std::collections::HashMap::new();
-    let mut all_targets: Vec<TargetSummary> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut counts = std::collections::HashMap::new();
-    let mut worst_states: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for row in &rows {
-        *counts.entry(row.target_id.clone()).or_insert(0usize) += 1;
-        let candidate = row.state.as_deref().unwrap_or("no_data");
-        let current = worst_states
-            .entry(row.target_id.clone())
-            .or_insert_with(|| candidate.to_owned());
-        if state_rank(candidate) > state_rank(current) {
-            *current = candidate.to_owned();
-        }
-    }
-
-    for row in &rows {
-        if seen.insert(row.target_id.clone()) {
-            let group = if row.group_path.is_empty() {
-                "default".to_owned()
-            } else {
-                row.group_path.clone()
-            };
-            let state_str = worst_states
-                .get(&row.target_id)
-                .map(String::as_str)
-                .unwrap_or("no_data");
-            let summary = TargetSummary {
-                target_id: row.target_id.clone(),
-                name: row.name.clone(),
-                group_path: group.clone(),
-                state: state_str.to_owned(),
-                checks_count: counts.get(&row.target_id).copied().unwrap_or(0),
-            };
-            target_map.entry(group).or_default().push(summary.clone());
-            all_targets.push(summary);
-        }
-    }
+    let (mut all_targets, target_map) = summarize_targets(&rows);
 
     all_targets.sort_by(|left, right| left.target_id.cmp(&right.target_id));
     if let Some(cursor) = cursor {
@@ -529,6 +490,55 @@ pub async fn list_targets(
         groups,
         next_cursor,
     }))
+}
+
+fn summarize_targets(
+    rows: &[kemuri_storage::TargetWithState],
+) -> (
+    Vec<TargetSummary>,
+    std::collections::HashMap<String, Vec<TargetSummary>>,
+) {
+    let mut target_map: std::collections::HashMap<String, Vec<TargetSummary>> =
+        std::collections::HashMap::new();
+    let mut all_targets: Vec<TargetSummary> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut counts = std::collections::HashMap::new();
+    let mut worst_states: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for row in rows {
+        *counts.entry(row.target_id.clone()).or_insert(0usize) += 1;
+        let candidate = row.state.as_deref().unwrap_or("no_data");
+        let current = worst_states
+            .entry(row.target_id.clone())
+            .or_insert_with(|| candidate.to_owned());
+        if state_rank(candidate) > state_rank(current) {
+            *current = candidate.to_owned();
+        }
+    }
+
+    for row in rows {
+        if seen.insert(row.target_id.clone()) {
+            let group = if row.group_path.is_empty() {
+                "default".to_owned()
+            } else {
+                row.group_path.clone()
+            };
+            let state_str = worst_states
+                .get(&row.target_id)
+                .map(String::as_str)
+                .unwrap_or("no_data");
+            let summary = TargetSummary {
+                target_id: row.target_id.clone(),
+                name: row.name.clone(),
+                group_path: group.clone(),
+                state: state_str.to_owned(),
+                checks_count: counts.get(&row.target_id).copied().unwrap_or(0),
+            };
+            target_map.entry(group).or_default().push(summary.clone());
+            all_targets.push(summary);
+        }
+    }
+    (all_targets, target_map)
 }
 
 fn state_rank(state: &str) -> u8 {
@@ -1649,16 +1659,17 @@ pub async fn list_groups(
 ) -> Result<Json<GroupsResponse>, ApiError> {
     let limit = validate_limit(query.limit, 100)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
-    let all_targets = list_targets(
-        State(state),
-        ApiQuery(PageQuery {
-            limit: Some(200),
-            cursor: None,
-        }),
-    )
-    .await?
-    .0;
-    let mut groups = all_targets.groups;
+    let rows = kemuri_storage::TargetRepo::list_with_state(&state.pool, state.observer_internal_id)
+        .await
+        .map_err(internal_error)?;
+    let (_, target_map) = summarize_targets(&rows);
+    let mut groups: Vec<GroupResponse> = target_map
+        .into_iter()
+        .map(|(group_path, targets)| GroupResponse {
+            group_path,
+            targets,
+        })
+        .collect();
     groups.sort_by(|left, right| left.group_path.cmp(&right.group_path));
     if let Some(cursor) = cursor {
         groups.retain(|group| group.group_path > cursor);
@@ -1693,21 +1704,19 @@ pub async fn get_group(
     State(state): State<AppState>,
     Path(group_path): Path<String>,
 ) -> Result<Json<GroupResponse>, ApiError> {
-    let groups = list_groups(
-        State(state),
-        ApiQuery(PageQuery {
-            limit: Some(200),
-            cursor: None,
-        }),
-    )
-    .await?
-    .0
-    .groups;
     let decoded = group_path.trim_matches('/');
-    groups
-        .into_iter()
-        .find(|group| group.group_path == decoded)
-        .map(Json)
+    let rows = kemuri_storage::TargetRepo::list_with_state(&state.pool, state.observer_internal_id)
+        .await
+        .map_err(internal_error)?;
+    let (_, mut target_map) = summarize_targets(&rows);
+    target_map
+        .remove(decoded)
+        .map(|targets| {
+            Json(GroupResponse {
+                group_path: decoded.to_owned(),
+                targets,
+            })
+        })
         .ok_or_else(|| not_found("group_not_found", "The requested group does not exist"))
 }
 

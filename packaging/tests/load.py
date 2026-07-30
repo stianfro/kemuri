@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import sys
@@ -51,13 +52,118 @@ class FixtureServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+class TcpFixtureHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        return
+
+
+class DnsUdpFixtureHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        query, server = self.request
+        server.sendto(dns_response(query), self.client_address)
+
+
+class DnsTcpFixtureHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        length_bytes = receive_exact(self.request, 2)
+        if len(length_bytes) != 2:
+            return
+        query = receive_exact(self.request, int.from_bytes(length_bytes, "big"))
+        response = dns_response(query)
+        self.request.sendall(len(response).to_bytes(2, "big") + response)
+
+
+class ThreadingTcpFixtureServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class ThreadingUdpFixtureServer(socketserver.ThreadingUDPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class FixtureSet:
+    def __init__(self) -> None:
+        self.http = FixtureServer(("127.0.0.1", 0), FixtureHandler)
+        self.tcp = ThreadingTcpFixtureServer(
+            ("127.0.0.1", 0), TcpFixtureHandler
+        )
+        self.dns_udp = ThreadingUdpFixtureServer(
+            ("127.0.0.1", 0), DnsUdpFixtureHandler
+        )
+        dns_port = int(self.dns_udp.server_address[1])
+        self.dns_tcp = ThreadingTcpFixtureServer(
+            ("127.0.0.1", dns_port), DnsTcpFixtureHandler
+        )
+        self.servers = (self.http, self.tcp, self.dns_udp, self.dns_tcp)
+        self.threads = [
+            threading.Thread(target=server.serve_forever, daemon=True)
+            for server in self.servers
+        ]
+
+    @property
+    def ports(self) -> dict[str, int]:
+        return {
+            "http": int(self.http.server_address[1]),
+            "tcp": int(self.tcp.server_address[1]),
+            "dns": int(self.dns_udp.server_address[1]),
+        }
+
+    def start(self) -> None:
+        for thread in self.threads:
+            thread.start()
+
+    def close(self) -> None:
+        for server in self.servers:
+            server.shutdown()
+        for server in self.servers:
+            server.server_close()
+        for thread in self.threads:
+            thread.join(timeout=2)
+
+
+def receive_exact(connection: socket.socket, length: int) -> bytes:
+    data = bytearray()
+    while len(data) < length:
+        part = connection.recv(length - len(data))
+        if not part:
+            break
+        data.extend(part)
+    return bytes(data)
+
+
+def dns_response(query: bytes) -> bytes:
+    end = 12
+    while end < len(query) and query[end] != 0:
+        end += query[end] + 1
+    end = min(end + 5, len(query))
+    response = bytearray(query[:end])
+    if len(response) < 12:
+        return bytes(response)
+    response[2:4] = b"\x81\x80"
+    response[6:12] = b"\x00\x01\x00\x00\x00\x00"
+    response.extend(
+        b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x7f\x00\x00\x01"
+    )
+    return bytes(response)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checks", type=int, default=100)
     parser.add_argument("--duration", type=int, default=10, help="run duration in seconds")
     parser.add_argument("--interval", default="5s")
     parser.add_argument("--concurrency", type=int, default=64)
-    parser.add_argument("--probe", choices=("http", "icmp"), default="http")
+    parser.add_argument(
+        "--probe", choices=("http", "icmp", "tcp", "dns", "mixed"), default="http"
+    )
+    parser.add_argument(
+        "--dns-protocol",
+        choices=("udp", "tcp"),
+        default="udp",
+        help="DNS transport for DNS and mixed workloads",
+    )
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/kemuri"))
     parser.add_argument(
@@ -129,13 +235,20 @@ def write_config(
     path: Path,
     database: Path,
     server_port: int,
-    fixture_port: int,
+    fixture_ports: dict[str, int],
     checks: int,
     interval: str,
     concurrency: int,
     probe: str,
     samples: int,
+    dns_protocol: str,
 ) -> None:
+    probe_counts = workload_probe_counts(probe, checks)
+    probe_limits = {
+        kind: min(concurrency, count)
+        for kind, count in probe_counts.items()
+        if count > 0
+    }
     lines = [
         "version: 1",
         "server:",
@@ -153,26 +266,29 @@ def write_config(
         "  tick_interval: 50ms",
         f"  max_concurrent: {concurrency}",
         "  max_concurrent_by_probe:",
-        f"    {probe}: {concurrency}",
         "profiles:",
     ]
-    if probe == "http":
+    profiles_index = lines.index("profiles:")
+    lines[profiles_index:profiles_index] = [
+        f"    {kind}: {limit}" for kind, limit in probe_limits.items()
+    ]
+    if probe_counts.get("http", 0):
         lines.extend(
             [
                 "  - kind: http",
-                "    id: load-probe",
-                f"    url: http://127.0.0.1:{fixture_port}/health",
+                "    id: load-http",
+                f"    url: http://127.0.0.1:{fixture_ports['http']}/health",
                 f"    interval: {yaml_string(interval)}",
                 "    timeout: 2s",
                 "    expected_status: 200",
                 "    measure_until: headers",
             ]
         )
-    else:
+    if probe_counts.get("icmp", 0):
         lines.extend(
             [
                 "  - kind: icmp",
-                "    id: load-probe",
+                "    id: load-icmp",
                 f"    interval: {yaml_string(interval)}",
                 "    timeout: 5s",
                 f"    count: {samples}",
@@ -180,19 +296,63 @@ def write_config(
                 "    payload_size: 56",
             ]
         )
-    lines.append("targets:")
-    for index in range(checks):
+    if probe_counts.get("tcp", 0):
         lines.extend(
             [
-                f"  - id: load-{index:06d}",
-                "    address: 127.0.0.1",
-                "    group_path: load",
-                "    checks:",
-                f"      - id: {probe}",
-                "        profile: load-probe",
+                "  - kind: tcp",
+                "    id: load-tcp",
+                "    host: 127.0.0.1",
+                f"    port: {fixture_ports['tcp']}",
+                f"    interval: {yaml_string(interval)}",
+                "    timeout: 2s",
+                "    address_family: ipv4",
             ]
         )
+    if probe_counts.get("dns", 0):
+        lines.extend(
+            [
+                "  - kind: dns",
+                "    id: load-dns",
+                "    name: fixture.test",
+                f"    server: 127.0.0.1:{fixture_ports['dns']}",
+                "    record_type: A",
+                f"    protocol: {dns_protocol}",
+                "    expected_rcode: noerror",
+                "    require_answer: true",
+                f"    interval: {yaml_string(interval)}",
+                "    timeout: 2s",
+            ]
+        )
+    lines.append("targets:")
+    index = 0
+    for kind, count in probe_counts.items():
+        for _ in range(count):
+            lines.extend(
+                [
+                    f"  - id: load-{index:06d}",
+                    "    address: 127.0.0.1",
+                    f"    group_path: load/{kind}",
+                    "    checks:",
+                    f"      - id: {kind}",
+                    f"        profile: load-{kind}",
+                ]
+            )
+            index += 1
     path.write_text("\n".join(lines) + "\n")
+
+
+def workload_probe_counts(probe: str, checks: int) -> dict[str, int]:
+    if probe != "mixed":
+        return {probe: checks}
+    weights = (("icmp", 70), ("http", 10), ("tcp", 10), ("dns", 10))
+    counts = {kind: checks * weight // 100 for kind, weight in weights}
+    assigned = sum(counts.values())
+    for kind, _ in weights:
+        if assigned >= checks:
+            break
+        counts[kind] += 1
+        assigned += 1
+    return counts
 
 
 def get(url: str, timeout: float = 2.0) -> tuple[int, bytes, float]:
@@ -419,10 +579,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[2]
     binary = args.binary.resolve()
     started = dt.datetime.now(dt.timezone.utc)
-    fixture = FixtureServer(("127.0.0.1", 0), FixtureHandler)
-    fixture_thread = threading.Thread(target=fixture.serve_forever, daemon=True)
-    fixture_thread.start()
-    fixture_port = int(fixture.server_address[1])
+    probe_counts = workload_probe_counts(args.probe, args.checks)
+    fixture = FixtureSet()
+    fixture.start()
     server_port = free_port()
 
     process: subprocess.Popen[bytes] | None = None
@@ -436,12 +595,13 @@ def main() -> int:
             config,
             database,
             server_port,
-            fixture_port,
+            fixture.ports,
             args.checks,
             args.interval,
             min(args.concurrency, args.checks),
             args.probe,
             args.samples,
+            args.dns_protocol,
         )
         base_url = f"http://127.0.0.1:{server_port}"
         api_latencies: list[float] = []
@@ -561,7 +721,22 @@ def main() -> int:
             },
             "workload": {
                 "probe": args.probe,
-                "samples_per_round": args.samples if args.probe == "icmp" else 1,
+                "probe_counts": probe_counts,
+                "dns_protocol": (
+                    args.dns_protocol
+                    if probe_counts.get("dns", 0)
+                    else None
+                ),
+                "samples_per_round": (
+                    args.samples if args.probe == "icmp" else 1
+                    if args.probe != "mixed"
+                    else None
+                ),
+                "samples_per_icmp_round": (
+                    args.samples
+                    if probe_counts.get("icmp", 0)
+                    else None
+                ),
                 "checks": args.checks,
                 "interval": args.interval,
                 "duration_seconds": args.duration,
@@ -633,8 +808,7 @@ def main() -> int:
             "failures": failures,
         }
 
-    fixture.shutdown()
-    fixture.server_close()
+    fixture.close()
     destination = output_path(args.output, started)
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if destination is not None:

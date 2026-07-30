@@ -26,13 +26,17 @@ import urllib.request
 
 GENERATOR_VERSION = 1
 VALID_MONTHS = (1, 6, 12)
-DEFAULT_ANCHOR = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+DEFAULT_ANCHOR = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / "crates" / "kemuri-storage" / "migrations"
 
 
 def timestamp(value: dt.datetime) -> str:
-    return value.astimezone(dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def create_schema(connection: sqlite3.Connection) -> None:
@@ -219,7 +223,9 @@ def generate_database(
                             int(observed_at.timestamp()) // resolution * resolution
                         )
                         bucket = timestamp(
-                            dt.datetime.fromtimestamp(bucket_seconds, tz=dt.UTC)
+                            dt.datetime.fromtimestamp(
+                                bucket_seconds, tz=dt.timezone.utc
+                            )
                         )
                         key = (check_internal_id, resolution, bucket)
                         aggregate = rollup_rows.setdefault(
@@ -582,7 +588,7 @@ def parse_anchor(value: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("anchor must include a timezone")
-    return parsed.astimezone(dt.UTC)
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def main() -> int:

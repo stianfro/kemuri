@@ -298,20 +298,23 @@ class ChurnTest:
         )
         assert revision_count >= 2
 
-        before_disable = self.round_count("base")
         self.write_valid(base_enabled=False, include_extra=True, timeout="600ms")
         self.reload("success")
         assert self.check_row("base")[:2] == (0, 0)
         assert self.api_check_ids() == {"extra"}
+        time.sleep(1.0)
+        disabled_rounds = self.round_count("base")
         time.sleep(1.25)
-        assert self.round_count("base") == before_disable, "disabled check still ran"
+        assert (
+            self.round_count("base") == disabled_rounds
+        ), "disabled check still ran after in-flight work drained"
 
         self.write_valid(include_extra=True, timeout="600ms")
         self.reload("success")
         assert self.check_row("base")[:2] == (1, 1)
         wait_until(
             "re-enabled base round",
-            lambda: self.round_count("base") > before_disable,
+            lambda: self.round_count("base") > disabled_rounds,
         )
 
         self.write_valid(timeout="600ms")

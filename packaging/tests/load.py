@@ -15,6 +15,7 @@ import signal
 import socket
 import socketserver
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -31,12 +32,15 @@ DEFAULT_MAX_DURATION_SECONDS = 3_600
 
 class FixtureHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path == "/health":
-            self.send_response(200)
+        if self.path in ("/health", "/unhealthy"):
+            status = 200 if self.path == "/health" else 503
+            body = b"ok" if status == 200 else b"unhealthy"
+            self.send_response(status)
             self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
-                self.wfile.write(b"ok")
+                self.wfile.write(body)
             except BrokenPipeError:
                 pass
             return
@@ -50,6 +54,7 @@ class FixtureHandler(http.server.BaseHTTPRequestHandler):
 class FixtureServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 1_024
 
 
 class TcpFixtureHandler(socketserver.BaseRequestHandler):
@@ -76,6 +81,7 @@ class DnsTcpFixtureHandler(socketserver.BaseRequestHandler):
 class ThreadingTcpFixtureServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 1_024
 
 
 class ThreadingUdpFixtureServer(socketserver.ThreadingUDPServer):
@@ -85,10 +91,104 @@ class ThreadingUdpFixtureServer(socketserver.ThreadingUDPServer):
 
 class FixtureSet:
     def __init__(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="kemuri-fixtures-")
+        temporary_path = Path(self.temporary.name)
+        self.certificate = temporary_path / "ca-cert.pem"
+        ca_private_key = temporary_path / "ca-key.pem"
+        server_certificate = temporary_path / "server-cert.pem"
+        server_private_key = temporary_path / "server-key.pem"
+        certificate_request = temporary_path / "server.csr"
+        certificate_extensions = temporary_path / "server.ext"
+        certificate_extensions.write_text(
+            "\n".join(
+                (
+                    "basicConstraints=critical,CA:FALSE",
+                    "keyUsage=critical,digitalSignature,keyEncipherment",
+                    "extendedKeyUsage=serverAuth",
+                    "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                )
+            )
+            + "\n"
+        )
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=Kemuri Load Test CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-keyout",
+                str(ca_private_key),
+                "-out",
+                str(self.certificate),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+                str(server_private_key),
+                "-out",
+                str(certificate_request),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                str(certificate_request),
+                "-CA",
+                str(self.certificate),
+                "-CAkey",
+                str(ca_private_key),
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-sha256",
+                "-extfile",
+                str(certificate_extensions),
+                "-out",
+                str(server_certificate),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.load_cert_chain(server_certificate, server_private_key)
         self.http = FixtureServer(("127.0.0.1", 0), FixtureHandler)
+        self.https = FixtureServer(("127.0.0.1", 0), FixtureHandler)
+        self.https.socket = tls_context.wrap_socket(
+            self.https.socket, server_side=True
+        )
         self.tcp = ThreadingTcpFixtureServer(
             ("127.0.0.1", 0), TcpFixtureHandler
         )
+        self.tls = ThreadingTcpFixtureServer(
+            ("127.0.0.1", 0), TcpFixtureHandler
+        )
+        self.tls.socket = tls_context.wrap_socket(self.tls.socket, server_side=True)
         self.dns_udp = ThreadingUdpFixtureServer(
             ("127.0.0.1", 0), DnsUdpFixtureHandler
         )
@@ -96,7 +196,15 @@ class FixtureSet:
         self.dns_tcp = ThreadingTcpFixtureServer(
             ("127.0.0.1", dns_port), DnsTcpFixtureHandler
         )
-        self.servers = (self.http, self.tcp, self.dns_udp, self.dns_tcp)
+        self.servers = (
+            self.http,
+            self.https,
+            self.tcp,
+            self.tls,
+            self.dns_udp,
+            self.dns_tcp,
+        )
+        self.closed_port = free_port()
         self.threads = [
             threading.Thread(target=server.serve_forever, daemon=True)
             for server in self.servers
@@ -106,8 +214,11 @@ class FixtureSet:
     def ports(self) -> dict[str, int]:
         return {
             "http": int(self.http.server_address[1]),
+            "https": int(self.https.server_address[1]),
             "tcp": int(self.tcp.server_address[1]),
+            "tls": int(self.tls.server_address[1]),
             "dns": int(self.dns_udp.server_address[1]),
+            "closed": self.closed_port,
         }
 
     def start(self) -> None:
@@ -121,6 +232,7 @@ class FixtureSet:
             server.server_close()
         for thread in self.threads:
             thread.join(timeout=2)
+        self.temporary.cleanup()
 
 
 def receive_exact(connection: socket.socket, length: int) -> bytes:
@@ -156,7 +268,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", default="5s")
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument(
-        "--probe", choices=("http", "icmp", "tcp", "dns", "mixed"), default="http"
+        "--probe",
+        choices=("http", "https", "icmp", "tcp", "tls", "dns", "mixed"),
+        default="http",
     )
     parser.add_argument(
         "--dns-protocol",
@@ -165,6 +279,12 @@ def parse_args() -> argparse.Namespace:
         help="DNS transport for DNS and mixed workloads",
     )
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument(
+        "--failure-percent",
+        type=int,
+        default=0,
+        help="percentage of checks that use a deterministic unhealthy fixture",
+    )
     parser.add_argument("--binary", type=Path, default=Path("target/debug/kemuri"))
     parser.add_argument(
         "--output",
@@ -194,6 +314,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--concurrency must be at least 1")
     if args.samples < 1:
         parser.error("--samples must be at least 1")
+    if not 0 <= args.failure_percent <= 100:
+        parser.error("--failure-percent must be between 0 and 100")
     if args.checks > DEFAULT_MAX_CHECKS and not args.allow_large_run:
         parser.error(
             f"more than {DEFAULT_MAX_CHECKS} checks requires --allow-large-run"
@@ -242,11 +364,19 @@ def write_config(
     probe: str,
     samples: int,
     dns_protocol: str,
+    failure_percent: int,
+    root_certificate: Path,
 ) -> None:
     probe_counts = workload_probe_counts(probe, checks)
+    scheduler_counts = {
+        "icmp": probe_counts.get("icmp", 0),
+        "http": probe_counts.get("http", 0) + probe_counts.get("https", 0),
+        "tcp": probe_counts.get("tcp", 0) + probe_counts.get("tls", 0),
+        "dns": probe_counts.get("dns", 0),
+    }
     probe_limits = {
         kind: min(concurrency, count)
-        for kind, count in probe_counts.items()
+        for kind, count in scheduler_counts.items()
         if count > 0
     }
     lines = [
@@ -284,6 +414,21 @@ def write_config(
                 "    measure_until: headers",
             ]
         )
+    if probe_counts.get("https", 0):
+        lines.extend(
+            [
+                "  - kind: http",
+                "    id: load-https",
+                f"    url: https://127.0.0.1:{fixture_ports['https']}/health",
+                f"    interval: {yaml_string(interval)}",
+                "    timeout: 2s",
+                "    expected_status: 200",
+                "    measure_until: body",
+                "    tls_validate: true",
+                "    root_certificates:",
+                f"      - {yaml_string(str(root_certificate))}",
+            ]
+        )
     if probe_counts.get("icmp", 0):
         lines.extend(
             [
@@ -308,6 +453,24 @@ def write_config(
                 "    address_family: ipv4",
             ]
         )
+    if probe_counts.get("tls", 0):
+        lines.extend(
+            [
+                "  - kind: tcp",
+                "    id: load-tls",
+                "    host: 127.0.0.1",
+                f"    port: {fixture_ports['tls']}",
+                f"    interval: {yaml_string(interval)}",
+                "    timeout: 2s",
+                "    address_family: ipv4",
+                "    tls:",
+                "      enabled: true",
+                "      server_name: localhost",
+                "      tls_validate: true",
+                "      root_certificates:",
+                f"        - {yaml_string(str(root_certificate))}",
+            ]
+        )
     if probe_counts.get("dns", 0):
         lines.extend(
             [
@@ -324,19 +487,34 @@ def write_config(
             ]
         )
     lines.append("targets:")
+    failed_counts = workload_failure_counts(probe_counts, failure_percent)
     index = 0
     for kind, count in probe_counts.items():
-        for _ in range(count):
+        for kind_index in range(count):
+            failed = kind_index < failed_counts[kind]
+            address = "192.0.2.1" if kind == "icmp" and failed else "127.0.0.1"
             lines.extend(
                 [
                     f"  - id: load-{index:06d}",
-                    "    address: 127.0.0.1",
+                    f"    address: {address}",
                     f"    group_path: load/{kind}",
                     "    checks:",
                     f"      - id: {kind}",
                     f"        profile: load-{kind}",
                 ]
             )
+            if failed:
+                if kind in ("http", "https"):
+                    scheme = kind
+                    lines.append(
+                        f"        url: {scheme}://127.0.0.1:{fixture_ports[kind]}/unhealthy"
+                    )
+                elif kind == "tcp":
+                    lines.append(f"        port: {fixture_ports['closed']}")
+                elif kind == "tls":
+                    lines.append(f"        port: {fixture_ports['tcp']}")
+                elif kind == "dns":
+                    lines.append("        expected_rcode: nxdomain")
             index += 1
     path.write_text("\n".join(lines) + "\n")
 
@@ -344,7 +522,14 @@ def write_config(
 def workload_probe_counts(probe: str, checks: int) -> dict[str, int]:
     if probe != "mixed":
         return {probe: checks}
-    weights = (("icmp", 70), ("http", 10), ("tcp", 10), ("dns", 10))
+    weights = (
+        ("icmp", 70),
+        ("http", 5),
+        ("https", 5),
+        ("tcp", 5),
+        ("tls", 5),
+        ("dns", 10),
+    )
     counts = {kind: checks * weight // 100 for kind, weight in weights}
     assigned = sum(counts.values())
     for kind, _ in weights:
@@ -353,6 +538,28 @@ def workload_probe_counts(probe: str, checks: int) -> dict[str, int]:
         counts[kind] += 1
         assigned += 1
     return counts
+
+
+def workload_failure_counts(
+    probe_counts: dict[str, int], failure_percent: int
+) -> dict[str, int]:
+    total_checks = sum(probe_counts.values())
+    desired_failures = math.ceil(total_checks * failure_percent / 100)
+    exact = {
+        kind: count * failure_percent / 100
+        for kind, count in probe_counts.items()
+    }
+    failures = {kind: math.floor(value) for kind, value in exact.items()}
+    remaining = desired_failures - sum(failures.values())
+    order = {kind: index for index, kind in enumerate(probe_counts)}
+    ranked = sorted(
+        probe_counts,
+        key=lambda kind: (exact[kind] - failures[kind], -order[kind]),
+        reverse=True,
+    )
+    for kind in ranked[:remaining]:
+        failures[kind] += 1
+    return failures
 
 
 def get(url: str, timeout: float = 2.0) -> tuple[int, bytes, float]:
@@ -452,7 +659,7 @@ def git_dirty(root: Path) -> bool:
 
 
 def validate_database(
-    database: Path, expected_checks: int, interval: str
+    database: Path, expected_checks: int, interval: str, failure_percent: int
 ) -> dict[str, object]:
     connection = sqlite3.connect(database)
     try:
@@ -487,6 +694,15 @@ def validate_database(
                 "SELECT execution_status, count(*) FROM rounds GROUP BY execution_status"
             ).fetchall()
         )
+        sample_totals = connection.execute(
+            """
+            SELECT
+                coalesce(sum(healthy_samples), 0),
+                coalesce(sum(unhealthy_samples), 0),
+                coalesce(sum(measurement_loss_samples), 0)
+            FROM rounds
+            """
+        ).fetchone()
         dispatch_delays = [
             max(0.0, float(row[0]))
             for row in connection.execute(
@@ -532,6 +748,20 @@ def validate_database(
         failures.append(f"{checks_without_rounds} active checks have no stored round")
     if missing_slot_gaps:
         failures.append(f"found {missing_slot_gaps} gaps larger than one scheduled slot")
+    if status_counts.get("internal_error", 0):
+        failures.append(
+            f"found {status_counts['internal_error']} internally failed rounds"
+        )
+    healthy_samples, unhealthy_samples, measurement_loss_samples = sample_totals
+    failed_samples = unhealthy_samples + measurement_loss_samples
+    if failure_percent > 0 and failed_samples == 0:
+        failures.append("failure scenario did not record an unhealthy or lost sample")
+    if failure_percent == 0 and failed_samples > 0:
+        failures.append(
+            f"healthy scenario recorded {failed_samples} unhealthy or lost samples"
+        )
+    if failure_percent < 100 and healthy_samples == 0:
+        failures.append("scenario did not record a healthy sample")
     dispatch_limit = max(1.0, interval_value * 0.05)
     late_rounds = sum(delay > dispatch_limit for delay in dispatch_delays)
     on_time_ratio = (
@@ -553,6 +783,9 @@ def validate_database(
         "checks_without_rounds": checks_without_rounds,
         "missing_slot_gaps": missing_slot_gaps,
         "execution_status_counts": status_counts,
+        "healthy_samples": healthy_samples,
+        "unhealthy_samples": unhealthy_samples,
+        "measurement_loss_samples": measurement_loss_samples,
         "dispatch_limit_seconds": dispatch_limit,
         "dispatch_delay_p99_seconds": percentile(dispatch_delays, 0.99),
         "dispatched_rounds": len(dispatch_delays),
@@ -602,6 +835,8 @@ def main() -> int:
             args.probe,
             args.samples,
             args.dns_protocol,
+            args.failure_percent,
+            fixture.certificate,
         )
         base_url = f"http://127.0.0.1:{server_port}"
         api_latencies: list[float] = []
@@ -672,7 +907,9 @@ def main() -> int:
 
         database_result: dict[str, object]
         if database.exists():
-            database_result = validate_database(database, args.checks, args.interval)
+            database_result = validate_database(
+                database, args.checks, args.interval, args.failure_percent
+            )
         else:
             database_result = {"failures": ["Kemuri did not create the database"]}
         log_text = log.read_text(errors="replace")
@@ -722,11 +959,15 @@ def main() -> int:
             "workload": {
                 "probe": args.probe,
                 "probe_counts": probe_counts,
+                "failed_check_counts": workload_failure_counts(
+                    probe_counts, args.failure_percent
+                ),
                 "dns_protocol": (
                     args.dns_protocol
                     if probe_counts.get("dns", 0)
                     else None
                 ),
+                "failure_percent": args.failure_percent,
                 "samples_per_round": (
                     args.samples if args.probe == "icmp" else 1
                     if args.probe != "mixed"

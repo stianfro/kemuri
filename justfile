@@ -73,7 +73,9 @@ test-container:
 
 test-load: build
     cargo test -p kemuri-server --test load
-    python3 packaging/tests/load.py --checks 100 --duration 3 --interval 1s --output -
+    python3 packaging/tests/load.py --checks 100 --duration 3 --interval 1s --concurrency 100 --output -
+    python3 packaging/tests/load.py --checks 20 --duration 2 --interval 1s --probe https --failure-percent 50 --output -
+    python3 packaging/tests/load.py --checks 20 --duration 2 --interval 1s --probe tls --failure-percent 50 --output -
 
 load-test-local *args: build
     python3 packaging/tests/load.py {{args}}

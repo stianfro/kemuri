@@ -76,9 +76,40 @@ test-load: build
     python3 packaging/tests/load.py --checks 100 --duration 3 --interval 1s --concurrency 100 --api-readers 4 --output -
     python3 packaging/tests/load.py --checks 20 --duration 2 --interval 1s --probe https --failure-percent 50 --output -
     python3 packaging/tests/load.py --checks 20 --duration 2 --interval 1s --probe tls --failure-percent 50 --output -
+    python3 packaging/tests/api_pressure.py
+    python3 packaging/tests/reload_churn.py --iterations 5
+    python3 packaging/tests/resilience.py --checks 6 --output -
+    python3 -m unittest discover -s packaging/tests/history -p 'test_*.py'
 
 load-test-local *args: build
     python3 packaging/tests/load.py {{args}}
+
+load-test-api *args: build
+    python3 packaging/tests/api_pressure.py {{args}}
+
+load-test-reload *args: build
+    python3 packaging/tests/reload_churn.py {{args}}
+
+load-test-resilience *args: build
+    python3 packaging/tests/resilience.py {{args}}
+
+load-test-history *args: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    python3 packaging/tests/history_scale.py --output "$work/history.db" {{args}}
+
+load-test-private *args: build
+    python3 packaging/tests/load.py {{args}}
+
+load-test-soak *args: build
+    python3 packaging/tests/load.py --checks 500 --duration 86400 --allow-long-run --interval 300s --probe mixed --concurrency 128 --api-readers 4 {{args}}
+
+load-result-check result:
+    jq -e '.schema_version == 1 and .status == "passed" and (.failures | length == 0)' {{quote(result)}} >/dev/null
+
+test-scale: test-load test-browser
 
 bench:
     cargo bench --workspace --no-run

@@ -268,6 +268,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", default="5s")
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument(
+        "--probe-concurrency",
+        type=int,
+        help="per-probe concurrency limit, defaults to the global limit",
+    )
+    parser.add_argument(
         "--probe",
         choices=("http", "https", "icmp", "tcp", "tls", "dns", "mixed"),
         default="http",
@@ -312,6 +317,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--duration must be at least 1")
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
+    if args.probe_concurrency is not None and args.probe_concurrency < 1:
+        parser.error("--probe-concurrency must be at least 1")
     if args.samples < 1:
         parser.error("--samples must be at least 1")
     if not 0 <= args.failure_percent <= 100:
@@ -366,6 +373,7 @@ def write_config(
     dns_protocol: str,
     failure_percent: int,
     root_certificate: Path,
+    probe_concurrency: int | None,
 ) -> None:
     probe_counts = workload_probe_counts(probe, checks)
     scheduler_counts = {
@@ -374,8 +382,9 @@ def write_config(
         "tcp": probe_counts.get("tcp", 0) + probe_counts.get("tls", 0),
         "dns": probe_counts.get("dns", 0),
     }
+    effective_probe_concurrency = probe_concurrency or concurrency
     probe_limits = {
-        kind: min(concurrency, count)
+        kind: min(effective_probe_concurrency, count)
         for kind, count in scheduler_counts.items()
         if count > 0
     }
@@ -703,6 +712,30 @@ def validate_database(
             FROM rounds
             """
         ).fetchone()
+        profile_sample_totals = {
+            row[0]: {
+                "rounds": row[1],
+                "attempted_samples": row[2],
+                "healthy_samples": row[3],
+                "unhealthy_samples": row[4],
+                "measurement_loss_samples": row[5],
+            }
+            for row in connection.execute(
+                """
+                SELECT
+                    c.profile_id,
+                    count(*),
+                    coalesce(sum(r.attempted_samples), 0),
+                    coalesce(sum(r.healthy_samples), 0),
+                    coalesce(sum(r.unhealthy_samples), 0),
+                    coalesce(sum(r.measurement_loss_samples), 0)
+                FROM rounds r
+                JOIN checks c ON c.internal_id = r.check_internal_id
+                GROUP BY c.profile_id
+                ORDER BY c.profile_id
+                """
+            ).fetchall()
+        }
         dispatch_delays = [
             max(0.0, float(row[0]))
             for row in connection.execute(
@@ -786,6 +819,7 @@ def validate_database(
         "healthy_samples": healthy_samples,
         "unhealthy_samples": unhealthy_samples,
         "measurement_loss_samples": measurement_loss_samples,
+        "profile_sample_totals": profile_sample_totals,
         "dispatch_limit_seconds": dispatch_limit,
         "dispatch_delay_p99_seconds": percentile(dispatch_delays, 0.99),
         "dispatched_rounds": len(dispatch_delays),
@@ -837,6 +871,7 @@ def main() -> int:
             args.dns_protocol,
             args.failure_percent,
             fixture.certificate,
+            args.probe_concurrency,
         )
         base_url = f"http://127.0.0.1:{server_port}"
         api_latencies: list[float] = []
@@ -982,6 +1017,11 @@ def main() -> int:
                 "interval": args.interval,
                 "duration_seconds": args.duration,
                 "max_concurrent": min(args.concurrency, args.checks),
+                "max_concurrent_by_probe": (
+                    min(args.probe_concurrency, args.checks)
+                    if args.probe_concurrency is not None
+                    else min(args.concurrency, args.checks)
+                ),
             },
             "safety_limits": {
                 "maximum_checks_without_override": DEFAULT_MAX_CHECKS,

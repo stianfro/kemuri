@@ -470,19 +470,22 @@ pub async fn serve(
         .into_future();
     tokio::pin!(server);
 
-    let result = loop {
+    let (result, server_finished) = loop {
         tokio::select! {
-            result = &mut server => break result,
+            result = &mut server => break (result, true),
             _ = shutdown_rx_main.recv() => {
                 runtime_ready.store(false, Ordering::Release);
-                break Ok(());
+                break (Ok(()), false);
             },
             Some(component) = fatal_rx.recv() => {
                 runtime_ready.store(false, Ordering::Release);
                 tracing::error!(component, "required runtime task exited unexpectedly");
-                break Err(std::io::Error::other(format!(
-                    "required runtime task exited: {component}"
-                )));
+                break (
+                    Err(std::io::Error::other(format!(
+                        "required runtime task exited: {component}"
+                    ))),
+                    false,
+                );
             }
             Some(()) = reload_rx.recv() => {
             perform_reload(
@@ -508,7 +511,11 @@ pub async fn serve(
     let _ = worker_shutdown_tx.send(());
 
     let graceful = async {
-        let server_result = (&mut server).await;
+        let server_result = if server_finished {
+            Ok(())
+        } else {
+            (&mut server).await
+        };
         for worker in &mut worker_handles {
             let _ = worker.await;
         }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import http.server
 import json
@@ -310,6 +311,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-storage-mib", type=int, default=1_024)
     parser.add_argument("--min-available-memory-mib", type=int, default=512)
     parser.add_argument("--max-api-latency-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--api-readers",
+        type=int,
+        default=1,
+        help="number of concurrent API readers, from 1 through 32",
+    )
+    parser.add_argument(
+        "--require-rollup-resolution",
+        type=int,
+        action="append",
+        choices=(300, 3600),
+        default=[],
+        help="fail unless the database contains this rollup resolution",
+    )
     args = parser.parse_args()
     if args.checks < 1:
         parser.error("--checks must be at least 1")
@@ -336,6 +351,8 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be at least 1")
     if args.max_api_latency_seconds <= 0:
         parser.error("--max-api-latency-seconds must be greater than zero")
+    if not 1 <= args.api_readers <= 32:
+        parser.error("--api-readers must be between 1 and 32")
     if not args.binary.is_file():
         parser.error(f"Kemuri binary not found: {args.binary}")
     return args
@@ -603,6 +620,86 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return ordered[index]
 
 
+def api_endpoints(
+    probe_counts: dict[str, int], started: dt.datetime, duration: int
+) -> list[tuple[str, str]]:
+    first_kind = next(kind for kind, count in probe_counts.items() if count > 0)
+    target_id = "load-000000"
+    check_path = f"/api/v1/targets/{target_id}/checks/{first_kind}"
+    from_ms = int((started - dt.timedelta(minutes=1)).timestamp() * 1000)
+    to_ms = int(
+        (started + dt.timedelta(seconds=duration, minutes=1)).timestamp() * 1000
+    )
+    return [
+        ("targets", "/api/v1/targets?limit=200"),
+        ("target_detail", f"/api/v1/targets/{target_id}"),
+        ("checks", f"/api/v1/targets/{target_id}/checks?limit=200"),
+        ("check_detail", check_path),
+        (
+            "series",
+            f"{check_path}/series?from_ms={from_ms}&to_ms={to_ms}&max_points=1000",
+        ),
+        ("rounds", f"{check_path}/rounds?limit=200"),
+        ("alerts", "/api/v1/alerts?limit=200"),
+        ("alert_events", "/api/v1/alert-events?limit=200"),
+        ("system", "/api/v1/system/status"),
+        ("metrics", "/metrics"),
+    ]
+
+
+def summarize_api_observations(
+    observations: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    all_latencies: list[float] = []
+    endpoints: dict[str, object] = {}
+    total_errors = 0
+    for name, observation in observations.items():
+        latencies = observation["latencies"]
+        assert isinstance(latencies, list)
+        errors = int(observation["errors"])
+        total_errors += errors
+        all_latencies.extend(latencies)
+        endpoints[name] = {
+            "requests": len(latencies),
+            "errors": errors,
+            "p50_ms": (
+                round((percentile(latencies, 0.50) or 0) * 1000, 3)
+                if latencies
+                else None
+            ),
+            "p95_ms": (
+                round((percentile(latencies, 0.95) or 0) * 1000, 3)
+                if latencies
+                else None
+            ),
+            "p99_ms": (
+                round((percentile(latencies, 0.99) or 0) * 1000, 3)
+                if latencies
+                else None
+            ),
+        }
+    return {
+        "requests": len(all_latencies),
+        "errors": total_errors,
+        "p50_ms": (
+            round((percentile(all_latencies, 0.50) or 0) * 1000, 3)
+            if all_latencies
+            else None
+        ),
+        "p95_ms": (
+            round((percentile(all_latencies, 0.95) or 0) * 1000, 3)
+            if all_latencies
+            else None
+        ),
+        "p99_ms": (
+            round((percentile(all_latencies, 0.99) or 0) * 1000, 3)
+            if all_latencies
+            else None
+        ),
+        "endpoints": endpoints,
+    }
+
+
 def process_sample(pid: int) -> dict[str, int]:
     status: dict[str, int] = {}
     status_path = Path(f"/proc/{pid}/status")
@@ -668,7 +765,11 @@ def git_dirty(root: Path) -> bool:
 
 
 def validate_database(
-    database: Path, expected_checks: int, interval: str, failure_percent: int
+    database: Path,
+    expected_checks: int,
+    interval: str,
+    failure_percent: int,
+    required_rollup_resolutions: list[int],
 ) -> dict[str, object]:
     connection = sqlite3.connect(database)
     try:
@@ -765,6 +866,40 @@ def validate_database(
             """,
             (interval_value * 1.5,),
         ).fetchone()[0]
+        rollup_coverage = {
+            str(row[0]): {
+                "buckets": row[1],
+                "scheduled_rounds": row[2],
+                "mismatched_buckets": row[3],
+            }
+            for row in connection.execute(
+                """
+                SELECT
+                    ro.resolution_seconds,
+                    count(*),
+                    coalesce(sum(ro.scheduled_rounds), 0),
+                    sum(
+                        CASE WHEN ro.scheduled_rounds != (
+                            SELECT count(*)
+                            FROM rounds r
+                            WHERE r.check_internal_id = ro.check_internal_id
+                              AND r.observer_internal_id = ro.observer_internal_id
+                              AND datetime(r.scheduled_at) >= datetime(ro.bucket_start)
+                              AND datetime(r.scheduled_at) < datetime(
+                                  ro.bucket_start,
+                                  '+' || ro.resolution_seconds || ' seconds'
+                              )
+                        ) THEN 1 ELSE 0 END
+                    )
+                FROM rollups ro
+                GROUP BY ro.resolution_seconds
+                ORDER BY ro.resolution_seconds
+                """
+            ).fetchall()
+        }
+        raw_range = connection.execute(
+            "SELECT min(scheduled_at), max(scheduled_at) FROM rounds"
+        ).fetchone()
     finally:
         connection.close()
 
@@ -781,6 +916,17 @@ def validate_database(
         failures.append(f"{checks_without_rounds} active checks have no stored round")
     if missing_slot_gaps:
         failures.append(f"found {missing_slot_gaps} gaps larger than one scheduled slot")
+    mismatched_rollups = sum(
+        int(coverage["mismatched_buckets"])
+        for coverage in rollup_coverage.values()
+    )
+    if mismatched_rollups:
+        failures.append(
+            f"found {mismatched_rollups} rollup buckets that do not match raw rounds"
+        )
+    for resolution in required_rollup_resolutions:
+        if str(resolution) not in rollup_coverage:
+            failures.append(f"required {resolution}-second rollups were not created")
     if status_counts.get("internal_error", 0):
         failures.append(
             f"found {status_counts['internal_error']} internally failed rounds"
@@ -815,6 +961,11 @@ def validate_database(
         "duplicate_slots": duplicate_slots,
         "checks_without_rounds": checks_without_rounds,
         "missing_slot_gaps": missing_slot_gaps,
+        "raw_range": {
+            "oldest_scheduled_at": raw_range[0],
+            "newest_scheduled_at": raw_range[1],
+        },
+        "rollup_coverage": rollup_coverage,
         "execution_status_counts": status_counts,
         "healthy_samples": healthy_samples,
         "unhealthy_samples": unhealthy_samples,
@@ -874,8 +1025,12 @@ def main() -> int:
             args.probe_concurrency,
         )
         base_url = f"http://127.0.0.1:{server_port}"
-        api_latencies: list[float] = []
+        endpoint_paths = api_endpoints(probe_counts, started, args.duration)
+        api_observations: dict[str, dict[str, object]] = {
+            name: {"latencies": [], "errors": 0} for name, _ in endpoint_paths
+        }
         resource_samples: list[dict[str, int]] = []
+        storage_samples: list[int] = []
         metrics_text = ""
         run_error: str | None = None
         shutdown_clean = False
@@ -890,40 +1045,70 @@ def main() -> int:
             try:
                 wait_ready(base_url, process)
                 deadline = time.monotonic() + args.duration
-                endpoints = [
-                    "/api/v1/targets?limit=200",
-                    "/api/v1/system/status",
-                    "/metrics",
-                ]
                 request_index = 0
-                while time.monotonic() < deadline:
-                    if process.poll() is not None:
-                        raise RuntimeError(
-                            f"Kemuri exited during the run with {process.returncode}"
-                        )
-                    endpoint = endpoints[request_index % len(endpoints)]
-                    request_index += 1
-                    status, _, elapsed = get(f"{base_url}{endpoint}")
-                    if status != 200:
-                        raise RuntimeError(f"{endpoint} returned HTTP {status}")
-                    if elapsed > args.max_api_latency_seconds:
-                        raise RuntimeError(
-                            f"{endpoint} exceeded the API latency safety limit"
-                        )
-                    api_latencies.append(elapsed)
-                    sample = process_sample(process.pid)
-                    resource_samples.append(sample)
-                    if sample.get("rss_bytes", 0) > args.max_rss_mib * 1024 * 1024:
-                        raise RuntimeError("Kemuri exceeded the RSS safety limit")
-                    available = available_memory_bytes()
-                    if (
-                        available is not None
-                        and available < args.min_available_memory_mib * 1024 * 1024
-                    ):
-                        raise RuntimeError("host available memory crossed the safety limit")
-                    if storage_bytes(database) > args.max_storage_mib * 1024 * 1024:
-                        raise RuntimeError("Kemuri storage crossed the safety limit")
-                    time.sleep(0.1)
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=args.api_readers
+                ) as executor:
+                    while time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            raise RuntimeError(
+                                f"Kemuri exited during the run with {process.returncode}"
+                            )
+                        selected = [
+                            endpoint_paths[
+                                (request_index + offset) % len(endpoint_paths)
+                            ]
+                            for offset in range(args.api_readers)
+                        ]
+                        request_index += args.api_readers
+                        futures = [
+                            (
+                                name,
+                                path,
+                                executor.submit(
+                                    get,
+                                    f"{base_url}{path}",
+                                    args.max_api_latency_seconds,
+                                ),
+                            )
+                            for name, path in selected
+                        ]
+                        for name, path, future in futures:
+                            observation = api_observations[name]
+                            try:
+                                status, _, elapsed = future.result()
+                            except Exception:
+                                observation["errors"] = int(observation["errors"]) + 1
+                                raise
+                            latencies = observation["latencies"]
+                            assert isinstance(latencies, list)
+                            latencies.append(elapsed)
+                            if status != 200:
+                                observation["errors"] = int(observation["errors"]) + 1
+                                raise RuntimeError(f"{path} returned HTTP {status}")
+                            if elapsed > args.max_api_latency_seconds:
+                                observation["errors"] = int(observation["errors"]) + 1
+                                raise RuntimeError(
+                                    f"{path} exceeded the API latency safety limit"
+                                )
+                        sample = process_sample(process.pid)
+                        resource_samples.append(sample)
+                        if sample.get("rss_bytes", 0) > args.max_rss_mib * 1024 * 1024:
+                            raise RuntimeError("Kemuri exceeded the RSS safety limit")
+                        available = available_memory_bytes()
+                        if (
+                            available is not None
+                            and available
+                            < args.min_available_memory_mib * 1024 * 1024
+                        ):
+                            raise RuntimeError(
+                                "host available memory crossed the safety limit"
+                            )
+                        current_storage = storage_bytes(database)
+                        storage_samples.append(current_storage)
+                        if current_storage > args.max_storage_mib * 1024 * 1024:
+                            raise RuntimeError("Kemuri storage crossed the safety limit")
+                        time.sleep(0.1)
                 status, metrics_body, _ = get(f"{base_url}/metrics")
                 if status != 200:
                     raise RuntimeError(f"/metrics returned HTTP {status}")
@@ -943,7 +1128,11 @@ def main() -> int:
         database_result: dict[str, object]
         if database.exists():
             database_result = validate_database(
-                database, args.checks, args.interval, args.failure_percent
+                database,
+                args.checks,
+                args.interval,
+                args.failure_percent,
+                args.require_rollup_resolution,
             )
         else:
             database_result = {"failures": ["Kemuri did not create the database"]}
@@ -974,11 +1163,34 @@ def main() -> int:
                 failures.append(
                     f"metrics contain forbidden high-cardinality label {forbidden_label[:-1]!r}"
                 )
-        api_p95 = percentile(api_latencies, 0.95)
+        api_result = summarize_api_observations(api_observations)
+        api_p95_value = api_result["p95_ms"]
+        api_p95 = (
+            float(api_p95_value) / 1000 if api_p95_value is not None else None
+        )
         if api_p95 is not None and api_p95 > 0.5:
             failures.append(f"API p95 was {api_p95:.3f} seconds, above 0.5 seconds")
 
         finished = dt.datetime.now(dt.timezone.utc)
+        final_storage_bytes = storage_bytes(database)
+        initial_storage_bytes = storage_samples[0] if storage_samples else 0
+        peak_storage_bytes = max(storage_samples, default=final_storage_bytes)
+        observed_growth_bytes = max(0, peak_storage_bytes - initial_storage_bytes)
+        stored_rounds = int(database_result.get("rounds", 0))
+        upper_bound_bytes_per_stored_round = (
+            round(peak_storage_bytes / stored_rounds, 3) if stored_rounds else None
+        )
+        projected_upper_bound_mib_per_day = (
+            round(
+                upper_bound_bytes_per_stored_round
+                * args.checks
+                * (86_400 / duration_seconds(args.interval))
+                / (1024 * 1024),
+                3,
+            )
+            if upper_bound_bytes_per_stored_round is not None
+            else None
+        )
         result = {
             "schema_version": SCHEMA_VERSION,
             "status": "passed" if not failures else "failed",
@@ -1022,6 +1234,7 @@ def main() -> int:
                     if args.probe_concurrency is not None
                     else min(args.concurrency, args.checks)
                 ),
+                "required_rollup_resolutions": args.require_rollup_resolution,
             },
             "safety_limits": {
                 "maximum_checks_without_override": DEFAULT_MAX_CHECKS,
@@ -1035,24 +1248,7 @@ def main() -> int:
                 ),
                 "max_api_latency_seconds": args.max_api_latency_seconds,
             },
-            "api": {
-                "requests": len(api_latencies),
-                "p50_ms": (
-                    round((percentile(api_latencies, 0.50) or 0) * 1000, 3)
-                    if api_latencies
-                    else None
-                ),
-                "p95_ms": (
-                    round((api_p95 or 0) * 1000, 3)
-                    if api_latencies
-                    else None
-                ),
-                "p99_ms": (
-                    round((percentile(api_latencies, 0.99) or 0) * 1000, 3)
-                    if api_latencies
-                    else None
-                ),
-            },
+            "api": {"readers": args.api_readers, **api_result},
             "process": {
                 "peak_rss_bytes": max(rss_values, default=None),
                 "peak_threads": max(thread_values, default=None),
@@ -1085,6 +1281,15 @@ def main() -> int:
             "storage": {
                 **database_result,
                 "database_size_bytes": database.stat().st_size if database.exists() else 0,
+                "storage_files_size_bytes": final_storage_bytes,
+                "peak_storage_files_size_bytes": peak_storage_bytes,
+                "observed_growth_bytes": observed_growth_bytes,
+                "upper_bound_bytes_per_stored_round": (
+                    upper_bound_bytes_per_stored_round
+                ),
+                "projected_upper_bound_mib_per_day_at_configured_rate": (
+                    projected_upper_bound_mib_per_day
+                ),
             },
             "failures": failures,
         }

@@ -93,10 +93,15 @@ just test-api
 just test-usage
 just test-container
 just test-load
+just test-scale
 ```
 
 The usage test uses local HTTP, TCP, TLS, DNS, webhook, and browser fixtures.
 It does not use public internet services.
+
+The scale tests use bounded local fixtures. See
+[Load testing](/project/load-testing) for the test matrix and the opt-in
+commands.
 
 ## Contributions
 

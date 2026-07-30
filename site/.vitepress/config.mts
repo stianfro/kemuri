@@ -77,6 +77,7 @@ export default defineConfig({
         text: "Project",
         items: [
           { text: "Development", link: "/project/development" },
+          { text: "Load testing", link: "/project/load-testing" },
           { text: "Source provenance", link: "/project/provenance" },
           { text: "Security", link: "/project/security" },
           { text: "Release process", link: "/project/releases" },

@@ -91,6 +91,29 @@ for filename, expected in EXPECTED.items():
                 fail("Infinity queries must use HTTP GET URL sources")
         if "${__timeFrom}" not in encoded or "${__timeTo}" not in encoded:
             fail("the Infinity dashboard does not use backend time macros")
+        state_panel = next(
+            (panel for panel in dashboard["panels"] if panel.get("title") == "Current state"),
+            None,
+        )
+        if state_panel is None:
+            fail("the Infinity dashboard has no current-state panel")
+        state_query = state_panel.get("targets", [{}])[0]
+        if state_query.get("root_selector") != "$":
+            fail("the current-state query must select the API response root")
+        state_columns = state_query.get("columns", [])
+        if not any(
+            column.get("selector") == "state" and column.get("type") == "string"
+            for column in state_columns
+        ):
+            fail("the current-state query must read the string state field")
+        state_codes = state_query.get("computed_columns", [])
+        if not any(
+            column.get("text") == "State code" and column.get("type") == "number"
+            for column in state_codes
+        ):
+            fail("the current-state query must calculate a numeric state code")
+        if state_panel.get("options", {}).get("reduceOptions", {}).get("fields") != "State code":
+            fail("the current-state panel must display the calculated state code")
         heatmaps = [panel for panel in dashboard["panels"] if panel.get("type") == "heatmap"]
         if len(heatmaps) != 1:
             fail("the Infinity dashboard must have one smoke-style heatmap")

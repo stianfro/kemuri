@@ -128,8 +128,8 @@ for filename, expected in EXPECTED.items():
             fail("the smoke-style heatmap must use 48 latency buckets")
         if heatmap_options.get("cellGap") != 0:
             fail("the smoke-style heatmap must not put gaps between density cells")
-        if heatmap_options.get("color", {}).get("scheme") != "Greys":
-            fail("the smoke-style heatmap must use the smoke density color scheme")
+        if heatmap_options.get("color", {}).get("scheme") != "Blues":
+            fail("the smoke-style heatmap must use a theme-safe density color scheme")
         panel_by_title = {panel.get("title"): panel for panel in dashboard["panels"]}
         loss_position = panel_by_title.get("Loss and health failures", {}).get("gridPos", {})
         status_position = panel_by_title.get("Bucket status", {}).get("gridPos", {})

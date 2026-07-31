@@ -16,7 +16,7 @@ The overview shows these totals:
 
 The page groups targets by their configured group path.
 
-![Kemuri overview with four healthy targets](/screenshots/overview.png)
+![Kemuri overview with healthy and down targets](/screenshots/overview.png)
 
 ## Target page
 

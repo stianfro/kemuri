@@ -58,7 +58,7 @@ next: false
   </p>
   <div class="screen-grid">
     <figure>
-      <img src="/screenshots/overview.png" alt="Kemuri overview with four healthy targets" loading="lazy">
+      <img src="/screenshots/overview.png" alt="Kemuri overview with healthy and down targets" loading="lazy">
       <figcaption>The overview groups targets and shows their current state.</figcaption>
     </figure>
     <figure>

@@ -27,6 +27,8 @@ scrape_configs:
 
 Import `kemuri-service-health.json`. Select the Prometheus data source.
 
+![Grafana service-health dashboard for a running Kemuri process](/screenshots/grafana-service-health.png)
+
 This dashboard shows:
 
 - Active, queued, and running checks.
@@ -58,6 +60,8 @@ connect to Kemuri.
 
 Import `kemuri-check-analysis.json`. Select the Infinity data source. Then
 select a target and a check.
+
+![Grafana check-analysis dashboard with a smoke-style latency heatmap](/screenshots/grafana-check-analysis.png)
 
 The dashboard shows:
 

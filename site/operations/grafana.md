@@ -81,6 +81,9 @@ more samples.
 Timeouts and network errors do not enter the latency histogram. Use the loss
 panel and the bucket-status panel to inspect these results.
 
+The loss and bucket-status panels use the same time range and appear directly
+below the heatmap.
+
 The dashboard requests at most 300 time buckets for the heatmap. Kemuri uses
 rollups when the selected range contains too many raw rounds.
 

@@ -472,6 +472,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
             <button
               key={r.label}
               onClick={() => setRangeMs(r.duration)}
+              aria-pressed={rangeMs === r.duration}
               style={{
                 padding: '4px 10px',
                 fontSize: 12,
@@ -479,7 +480,7 @@ export function SmokeGraph({ targetId, checkId, fetchSeries }: SmokeGraphProps) 
                 borderColor: rangeMs === r.duration ? 'var(--accent)' : 'var(--border)',
                 borderRadius: 4,
                 background: rangeMs === r.duration ? 'var(--accent)' : 'transparent',
-                color: rangeMs === r.duration ? 'var(--accent)' : 'var(--text-muted)',
+                color: rangeMs === r.duration ? '#fff' : 'var(--text-muted)',
                 cursor: 'pointer',
               }}
             >

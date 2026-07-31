@@ -98,6 +98,8 @@ for filename, expected in EXPECTED.items():
         if heatmap.get("options", {}).get("calculate") is not True:
             fail("the smoke-style heatmap must calculate cells from sample density")
         heatmap_query = heatmap.get("targets", [{}])[0]
+        if "max_points=300" not in heatmap_query.get("url", ""):
+            fail("the smoke-style heatmap must limit the series to 300 time buckets")
         selectors = {column.get("selector") for column in heatmap_query.get("columns", [])}
         if not {"timestamp_ms", "latency_us"}.issubset(selectors):
             fail("the smoke-style heatmap does not define latency samples")

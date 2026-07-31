@@ -62,6 +62,17 @@ test-api:
 test-web:
     cd web && npm ci && npm test && npm run build
 
+test-grafana:
+    python3 integrations/grafana/tests/validate.py
+    find integrations/grafana -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 -r -n1 yq eval '.' >/dev/null
+    docker compose -f integrations/grafana/compose.yaml config >/dev/null
+
+grafana-up:
+    docker compose -f integrations/grafana/compose.yaml up --detach
+
+grafana-down:
+    docker compose -f integrations/grafana/compose.yaml down
+
 test-browser:
     bash packaging/tests/browser.sh
 
@@ -125,13 +136,13 @@ release-build *args:
     dist build {{args}}
 
 yaml:
-    find .github packaging -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 -r -n1 yq eval '.' >/dev/null
+    find .github packaging integrations -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 -r -n1 yq eval '.' >/dev/null
 
 audit:
     cargo deny check
     cd web && npm audit --omit=dev --audit-level=high
 
-ci: fmt lint test test-web docs-test yaml release-check
+ci: fmt lint test test-web test-grafana docs-test yaml release-check
 
 ci-diff: fmt lint test
 

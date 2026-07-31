@@ -1,0 +1,28 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: kemuri-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+
+  - name: Kemuri API
+    uid: kemuri-api
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    url: ${KEMURI_URL}
+    editable: true
+    jsonData:
+      allowedHosts:
+        - ${KEMURI_URL}
+      auth_method: none
+      customHealthCheckEnabled: true
+      customHealthCheckUrl: ${KEMURI_URL}/healthz
+      customHealthCheckUrlOptions:
+        method: GET

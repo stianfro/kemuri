@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: Kemuri
+    orgId: 1
+    folder: Kemuri
+    folderUid: kemuri
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/kemuri
+      foldersFromFilesStructure: false

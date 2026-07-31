@@ -146,6 +146,19 @@ API errors contain a request ID. The same value is returned in `X-Request-ID`. U
 For the full contract and unit rules, see the
 [HTTP API documentation](https://stianfro.github.io/kemuri/reference/api).
 
+## Grafana
+
+Prometheus can scrape `/metrics`. Kemuri includes a Grafana dashboard for
+service health.
+
+An optional dashboard uses the Grafana Infinity data source to read detailed
+check data from `/api/v1`. It includes a smoke-style latency heatmap, latency
+percentiles, loss, sample counts, bucket state, alerts, and revision markers.
+This dashboard does not add target or check identifiers to Prometheus labels.
+
+See the [Grafana documentation](https://stianfro.github.io/kemuri/operations/grafana)
+and the tracked files under [`integrations/grafana`](integrations/grafana).
+
 ## Backups
 
 Use `kemuri database backup --config <path> --output <file>` while the service is running. Use `--output -` to write a complete SQLite database image to standard output. Store backups outside the active data directory and test them with `PRAGMA integrity_check`.

@@ -71,6 +71,7 @@ export default defineConfig({
           { text: "Reload", link: "/operations/reload" },
           { text: "Backups and retention", link: "/operations/backups" },
           { text: "Containers", link: "/operations/containers" },
+          { text: "Grafana", link: "/operations/grafana" },
         ],
       },
       {

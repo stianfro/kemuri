@@ -61,7 +61,7 @@ connect to Kemuri.
 Import `kemuri-check-analysis.json`. Select the Infinity data source. Then
 select a target and a check.
 
-![Grafana check-analysis dashboard with a smoke-style latency heatmap](/screenshots/grafana-check-analysis.png)
+![Grafana check-analysis dashboard with a 24-hour intermittent ICMP latency heatmap](/screenshots/grafana-check-analysis.png)
 
 The dashboard shows:
 

@@ -29,7 +29,7 @@ The target state is the worst state of its active checks.
 
 Select a check to see its current measurements and history.
 
-![Kemuri check page with a smoke graph and recent rounds](/screenshots/check-detail.png)
+![Kemuri check page with a 24-hour intermittent ICMP smoke graph](/screenshots/check-detail.png)
 
 The smoke graph contains these data layers:
 

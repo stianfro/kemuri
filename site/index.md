@@ -62,8 +62,8 @@ next: false
       <figcaption>The overview groups targets and shows their current state.</figcaption>
     </figure>
     <figure>
-      <img src="/screenshots/check-detail.png" alt="Kemuri check page with a smoke graph and recent rounds" loading="lazy">
-      <figcaption>The check page shows latency, loss, health failures, and recent rounds.</figcaption>
+      <img src="/screenshots/check-detail.png" alt="Kemuri check page with a 24-hour intermittent ICMP smoke graph" loading="lazy">
+      <figcaption>The check page shows a 24-hour ICMP latency distribution and measurement loss.</figcaption>
     </figure>
   </div>
 </section>

@@ -118,8 +118,25 @@ for filename, expected in EXPECTED.items():
         if len(heatmaps) != 1:
             fail("the Infinity dashboard must have one smoke-style heatmap")
         heatmap = heatmaps[0]
-        if heatmap.get("options", {}).get("calculate") is not True:
+        heatmap_options = heatmap.get("options", {})
+        if heatmap_options.get("calculate") is not True:
             fail("the smoke-style heatmap must calculate cells from sample density")
+        calculation = heatmap_options.get("calculation", {})
+        if calculation.get("xBuckets", {}).get("value") != "24":
+            fail("the smoke-style heatmap must use 24 time buckets")
+        if calculation.get("yBuckets", {}).get("value") != "48":
+            fail("the smoke-style heatmap must use 48 latency buckets")
+        if heatmap_options.get("cellGap") != 0:
+            fail("the smoke-style heatmap must not put gaps between density cells")
+        if heatmap_options.get("color", {}).get("scheme") != "Greys":
+            fail("the smoke-style heatmap must use the smoke density color scheme")
+        panel_by_title = {panel.get("title"): panel for panel in dashboard["panels"]}
+        loss_position = panel_by_title.get("Loss and health failures", {}).get("gridPos", {})
+        status_position = panel_by_title.get("Bucket status", {}).get("gridPos", {})
+        heatmap_position = heatmap.get("gridPos", {})
+        expected_detail_y = heatmap_position.get("y", 0) + heatmap_position.get("h", 0)
+        if loss_position.get("y") != expected_detail_y or status_position.get("y") != expected_detail_y:
+            fail("loss and bucket status must appear directly below the smoke-style heatmap")
         heatmap_query = heatmap.get("targets", [{}])[0]
         if "max_points=300" not in heatmap_query.get("url", ""):
             fail("the smoke-style heatmap must limit the series to 300 time buckets")

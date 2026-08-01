@@ -74,9 +74,11 @@ The dashboard shows:
 
 ### Smoke-style heatmap
 
-The heatmap uses the histogram in each fixed time bucket. The vertical axis is
-latency in microseconds. The horizontal axis is time. A darker cell contains
-more samples.
+The heatmap uses the histogram in each fixed time bucket. The dashboard sends
+these buckets directly to the Grafana heatmap panel. It omits histogram rows
+that have no samples in the selected period. The vertical axis is latency in
+microseconds. The horizontal axis is time. A darker cell contains more
+samples.
 
 Timeouts and network errors do not enter the latency histogram. Use the loss
 panel and the bucket-status panel to inspect these results.

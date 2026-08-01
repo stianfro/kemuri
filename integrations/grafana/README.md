@@ -36,7 +36,9 @@ KEMURI_URL=http://192.0.2.10:8080 just grafana-up
 ```
 
 The check analysis dashboard starts with a smoke-style latency distribution.
+It sends the stored histogram buckets directly to the Grafana heatmap panel.
 Each heatmap cell contains the sample count for one latency and time bucket.
+The panel omits histogram rows that have no samples in the selected period.
 Timeouts and network errors do not enter the latency distribution. The loss
 panel shows these outcomes separately.
 

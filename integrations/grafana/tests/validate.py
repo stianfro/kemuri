@@ -119,13 +119,10 @@ for filename, expected in EXPECTED.items():
             fail("the Infinity dashboard must have one smoke-style heatmap")
         heatmap = heatmaps[0]
         heatmap_options = heatmap.get("options", {})
-        if heatmap_options.get("calculate") is not True:
-            fail("the smoke-style heatmap must calculate cells from sample density")
-        calculation = heatmap_options.get("calculation", {})
-        if calculation.get("xBuckets", {}).get("value") != "24":
-            fail("the smoke-style heatmap must use 24 time buckets")
-        if calculation.get("yBuckets", {}).get("value") != "48":
-            fail("the smoke-style heatmap must use 48 latency buckets")
+        if heatmap_options.get("calculate") is not False:
+            fail("the smoke-style heatmap must use pre-bucketed histogram cells")
+        if heatmap_options.get("rowsFrame", {}).get("layout") != "le":
+            fail("the smoke-style heatmap must use upper-bound bucket names")
         if heatmap_options.get("cellGap") != 0:
             fail("the smoke-style heatmap must not put gaps between density cells")
         if heatmap_options.get("color", {}).get("scheme") != "Blues":
@@ -140,8 +137,22 @@ for filename, expected in EXPECTED.items():
         heatmap_query = heatmap.get("targets", [{}])[0]
         if "max_points=300" not in heatmap_query.get("url", ""):
             fail("the smoke-style heatmap must limit the series to 300 time buckets")
-        selectors = {column.get("selector") for column in heatmap_query.get("columns", [])}
-        if not {"timestamp_ms", "latency_us"}.issubset(selectors):
-            fail("the smoke-style heatmap does not define latency samples")
+        if heatmap_query.get("columns"):
+            fail("the smoke-style heatmap must infer active histogram fields")
+        root_selector = heatmap_query.get("root_selector", "")
+        if "histogram_bins[$i]" not in root_selector or "$power(10, $i / 12)" not in root_selector:
+            fail("the smoke-style heatmap does not map native histogram bins")
+        conversions = [
+            conversion
+            for transform in heatmap.get("transformations", [])
+            if transform.get("id") == "convertFieldType"
+            for conversion in transform.get("options", {}).get("conversions", [])
+        ]
+        if not any(
+            conversion.get("targetField") == "timestamp_ms"
+            and conversion.get("destinationType") == "time"
+            for conversion in conversions
+        ):
+            fail("the smoke-style heatmap must convert its timestamp field")
 
 print(f"validated {len(EXPECTED)} Grafana dashboards")

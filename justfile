@@ -42,6 +42,7 @@ docs-install:
 
 docs-build: docs-install
     cd site && npm run build
+    python3 site/scripts/publish-agent-docs.py
 
 docs-dev: docs-install
     cd site && npm run dev

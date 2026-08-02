@@ -1,0 +1,45 @@
+# Kemuri
+
+> Kemuri is a single-node network latency monitor for Linux. It runs ICMP, HTTP, TCP, TLS, and DNS checks, stores results in SQLite, and displays smoke-style graphs.
+
+Use this index to find the raw Markdown documentation published with the Kemuri website.
+
+## Start here
+
+- [Introduction](index.md): Learn what Kemuri does and where it fits.
+- [Installation](guide/installation.md): Install Kemuri from a release, package, or container.
+- [Quick start](guide/quick-start.md): Configure and start your first checks.
+- [Configuration](reference/configuration.md): Read the full configuration reference.
+
+## Guides
+
+- [Web UI](guide/web-ui.md): Use the overview and check detail pages.
+- [Command line](guide/command-line.md): Use Kemuri commands and flags.
+
+## Concepts
+
+- [Architecture](concepts/architecture.md): Understand the process and its main components.
+- [Checks and rounds](concepts/checks-and-rounds.md): Understand scheduling and stored measurements.
+- [Status model](concepts/status-model.md): Understand check and service health states.
+
+## Reference
+
+- [Probe settings](reference/probes.md): Configure ICMP, HTTP, TCP, TLS, and DNS probes.
+- [Alerts and notifiers](reference/alerts.md): Configure alert rules, webhooks, and email.
+- [HTTP API](reference/api.md): Use the version 1 API and operational endpoints.
+
+## Operations
+
+- [Deployment](operations/deployment.md): Run Kemuri as a service.
+- [Reload](operations/reload.md): Apply configuration changes safely.
+- [Backups and retention](operations/backups.md): Protect and manage stored data.
+- [Containers](operations/containers.md): Run the container image.
+- [Grafana](operations/grafana.md): Use the supplied dashboards.
+
+## Project
+
+- [Development](project/development.md): Build and test Kemuri.
+- [Load testing](project/load-testing.md): Run the load test tools.
+- [Source provenance](project/provenance.md): Review source and dependency rules.
+- [Security](project/security.md): Review the security model and reporting process.
+- [Release process](project/releases.md): Prepare and publish a release.

@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri-config"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "http",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "criterion",
  "serde",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri-probes"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "kemuri-storage"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "criterion",
  "kemuri-config",

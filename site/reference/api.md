@@ -58,7 +58,11 @@ The series endpoint returns fixed time buckets. Each bucket has one state:
 The response also contains alert events and check revision markers. Clients can
 use these objects as graph overlays.
 
-Kemuri uses raw rounds where rollup coverage is not complete.
+Kemuri uses raw rounds where rollup coverage is not complete. It limits
+concurrent series work so dashboard refreshes cannot use every SQLite
+connection. Kemuri returns `503 series_busy` with `Retry-After` when a request
+waits too long or needs too many raw rounds to fill a rollup gap. Retry the
+request, or select a shorter range.
 
 ## Reload request
 

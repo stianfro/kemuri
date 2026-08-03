@@ -40,7 +40,7 @@ use kemuri_storage::StorageManager;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
 use rust_embed::RustEmbed;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use utoipa::OpenApi;
 
 pub use alerts::AlertEvaluator;
@@ -73,7 +73,12 @@ pub struct AppState {
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
     pub runtime_ready: Arc<AtomicBool>,
     pub probe_ready: Arc<AtomicBool>,
+    pub series_permits: Arc<Semaphore>,
 }
+
+// Keep two of the four SQLite pool connections available for writes,
+// readiness checks, and other API routes while Grafana refreshes its panels.
+const SERIES_QUERY_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct ReloadStatus {
@@ -416,6 +421,7 @@ pub async fn serve(
         shutdown_tx: shutdown_tx.clone(),
         runtime_ready: runtime_ready.clone(),
         probe_ready: probe_ready.clone(),
+        series_permits: Arc::new(Semaphore::new(SERIES_QUERY_CONCURRENCY)),
     };
 
     let config_path_arc = state.config_path.clone();

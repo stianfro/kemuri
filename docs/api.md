@@ -4,7 +4,7 @@ The OpenAPI document is at `/api/openapi.json`. Generated TypeScript types are t
 
 All timestamps are Unix milliseconds and use an `_ms` suffix. Latencies are integer microseconds and use a `_us` suffix. Range queries use `from_ms` and `to_ms`. Collection endpoints accept `limit` from 1 through 200 and an opaque `cursor` returned as `next_cursor`.
 
-The series endpoint returns fixed time buckets. Each bucket is `observed`, `skipped`, or `missing`. The response also contains alert events and check revision markers for graph overlays. Raw rounds are used where rollup coverage is not complete.
+The series endpoint returns fixed time buckets. Each bucket is `observed`, `skipped`, or `missing`. The response also contains alert events and check revision markers for graph overlays. Raw rounds are used where rollup coverage is not complete. Kemuri limits concurrent series work so dashboard refreshes cannot use every SQLite connection. It returns `503 series_busy` with `Retry-After` when a request waits too long or needs too many raw rounds to fill a rollup gap. Retry the request, or select a shorter range.
 
 Errors have `code`, a safe `message`, and `request_id`. The same ID is in `X-Request-ID`. SQL and internal error text are not returned. Unknown API routes return JSON 404 responses. Missing UI assets return normal 404 responses.
 

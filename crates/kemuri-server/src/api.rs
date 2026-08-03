@@ -10,6 +10,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 
+const SERIES_QUERY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+// A rollup gap must not turn a wide range request into an unbounded raw read.
+const MAX_SERIES_FALLBACK_ROUNDS: i64 = 10_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     pub code: String,
@@ -36,10 +40,12 @@ where
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry_later = self.code == "series_busy";
         let status = match self.code.as_str() {
             "target_not_found" | "check_not_found" | "alert_not_found" | "group_not_found"
             | "route_not_found" => StatusCode::NOT_FOUND,
             "bad_request" | "invalid_params" => StatusCode::BAD_REQUEST,
+            "series_busy" => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let request_id = self.request_id.clone();
@@ -48,6 +54,12 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert(HeaderName::from_static("x-request-id"), value);
+        }
+        if retry_later {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static("1"),
+            );
         }
         response
     }
@@ -72,6 +84,14 @@ pub(crate) fn not_found_public(code: &str, message: &str) -> ApiError {
 fn bad_request(message: &str) -> ApiError {
     ApiError {
         code: "bad_request".to_owned(),
+        message: message.to_owned(),
+        request_id: make_request_id(),
+    }
+}
+
+fn series_busy(message: &str) -> ApiError {
+    ApiError {
+        code: "series_busy".to_owned(),
         message: message.to_owned(),
         request_id: make_request_id(),
     }
@@ -831,6 +851,7 @@ pub struct SeriesRevisionMarker {
         (status = 200, body = SeriesResponse),
         (status = 400, body = ApiError),
         (status = 404, body = ApiError),
+        (status = 503, body = ApiError),
         (status = 500, body = ApiError)
     )
 )]
@@ -839,6 +860,17 @@ pub async fn get_series(
     Path((target_id, check_id)): Path<(String, String)>,
     ApiQuery(query): ApiQuery<SeriesQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
+    let _permit = tokio::time::timeout(
+        SERIES_QUERY_WAIT,
+        state.series_permits.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| {
+        metrics::counter!("kemuri_series_query_rejections_total", "reason" => "busy").increment(1);
+        series_busy("series query capacity is busy; retry later")
+    })?
+    .map_err(|_| internal_error("series query limiter closed"))?;
+
     let pool = state.pool.clone();
     let observer_id = state.observer_internal_id;
 
@@ -1157,6 +1189,30 @@ async fn build_series_from_rollups(
     to_time: &chrono::DateTime<chrono::FixedOffset>,
     max_points: u32,
 ) -> Result<(Vec<SeriesPoint>, i64), ApiError> {
+    build_series_from_rollups_with_limit(
+        pool,
+        check_internal_id,
+        observer_internal_id,
+        resolution_secs,
+        from_time,
+        to_time,
+        max_points,
+        MAX_SERIES_FALLBACK_ROUNDS,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_series_from_rollups_with_limit(
+    pool: &sqlx::SqlitePool,
+    check_internal_id: i64,
+    observer_internal_id: i64,
+    resolution_secs: i64,
+    from_time: &chrono::DateTime<chrono::FixedOffset>,
+    to_time: &chrono::DateTime<chrono::FixedOffset>,
+    max_points: u32,
+    fallback_round_limit: i64,
+) -> Result<(Vec<SeriesPoint>, i64), ApiError> {
     let aligned_from_secs = from_time.timestamp().div_euclid(resolution_secs) * resolution_secs;
     let aligned_from = chrono::DateTime::from_timestamp(aligned_from_secs, 0)
         .ok_or_else(|| bad_request("invalid series range"))?;
@@ -1181,9 +1237,20 @@ async fn build_series_from_rollups(
         resolution_secs,
         &from_str,
         &to_str,
+        fallback_round_limit + 1,
     )
     .await
     .map_err(internal_error)?;
+    if uncovered_rounds.len() > fallback_round_limit as usize {
+        metrics::counter!(
+            "kemuri_series_query_rejections_total",
+            "reason" => "fallback_limit"
+        )
+        .increment(1);
+        return Err(series_busy(
+            "series rollups are not ready for this range; retry with a shorter range",
+        ));
+    }
 
     let mut raw_by_start: std::collections::HashMap<i64, Vec<&kemuri_storage::RoundRow>> =
         std::collections::HashMap::new();
@@ -1730,6 +1797,16 @@ pub struct GroupsResponse {
 mod tests {
     use super::*;
 
+    #[test]
+    fn series_busy_error_is_retryable() {
+        let response = series_busy("retry later").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
+    }
+
     #[tokio::test]
     async fn rollup_series_falls_back_to_raw_and_keeps_fixed_buckets() {
         let storage = kemuri_storage::StorageManager::open_in_memory()
@@ -1837,6 +1914,20 @@ targets:
         assert_eq!(points[1].bucket_status, "observed");
         assert_eq!(points[1].min_latency_us, Some(2_000));
         assert_eq!(points[2].bucket_status, "missing");
+
+        let error = build_series_from_rollups_with_limit(
+            pool,
+            check.internal_id,
+            observer_id,
+            300,
+            &from,
+            &to,
+            100,
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "series_busy");
 
         let (merged, resolution) =
             build_series_from_rollups(pool, check.internal_id, observer_id, 300, &from, &to, 2)

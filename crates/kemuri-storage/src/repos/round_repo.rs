@@ -103,6 +103,7 @@ impl RoundRepo {
         resolution_seconds: i64,
         from: &str,
         to: &str,
+        limit: i64,
     ) -> Result<Vec<RoundRow>, sqlx::Error> {
         sqlx::query_as::<_, RoundRow>(
             "SELECT r.internal_id, r.check_internal_id, r.observer_internal_id,
@@ -126,13 +127,15 @@ impl RoundRepo {
                      AND unixepoch(r.scheduled_at) <
                          unixepoch(ru.bucket_start) + ru.resolution_seconds
                )
-             ORDER BY r.scheduled_at ASC",
+             ORDER BY r.scheduled_at ASC
+             LIMIT ?",
         )
         .bind(check_internal_id)
         .bind(observer_internal_id)
         .bind(from)
         .bind(to)
         .bind(resolution_seconds)
+        .bind(limit)
         .fetch_all(pool)
         .await
     }
